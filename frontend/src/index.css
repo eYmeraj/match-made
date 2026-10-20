@@ -191,6 +191,11 @@ code {
   margin-top: 4px;
 }
 
+/* When the actions wrap under the title, keep them on the right edge. */
+.page-head > .row {
+  margin-left: auto;
+}
+
 .stack {
   display: flex;
   flex-direction: column;

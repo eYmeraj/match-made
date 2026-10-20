@@ -8,10 +8,10 @@ import { formatPercent } from '../format'
 const MISSING: { value: MissingPolicy; label: string; help: string }[] = [
   {
     value: 'ignore',
-    label: 'Ignore the comparison',
-    help: 'Score on the remaining comparisons, re-weighted.',
+    label: 'Ignore that pair',
+    help: 'Score on the remaining column pairs, re-weighted.',
   },
-  { value: 'mismatch', label: 'Count as a mismatch', help: 'The comparison scores 0.' },
+  { value: 'mismatch', label: 'Count as a mismatch', help: 'That pair scores 0.' },
 ]
 
 const STAGES: Record<string, string> = {

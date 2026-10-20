@@ -56,8 +56,9 @@ export function ComparisonsStep({
     <div className="stack">
       <div className="spread">
         <p className="muted" style={{ maxWidth: 680 }}>
-          Pick the column pairs that identify the same entity. Each comparison scores 0–100
-          after cleaning, and the match score is their weighted average.
+          Add a pair for every column in file A that has a counterpart in file B, as many as
+          you need. Each pair scores 0–100 after cleaning, and the match score is their
+          weighted average.
         </p>
         <button type="button" className="btn" disabled={suggest.isPending} onClick={runSuggest}>
           {suggest.isPending ? <Spinner label="Suggesting…" /> : 'Auto-suggest'}
@@ -66,7 +67,7 @@ export function ComparisonsStep({
       {confirmSuggest && (
         <Notice tone="warning">
           <div className="spread">
-            <span>Replace your comparisons and blocking rules with suggestions?</span>
+            <span>Replace your column pairs and blocking rules with suggestions?</span>
             <div className="row">
               <button type="button" className="btn btn-sm" onClick={() => setConfirmSuggest(false)}>
                 Cancel
@@ -100,15 +101,13 @@ export function ComparisonsStep({
       ))}
 
       <AddComparison
+        // A fresh form after each add starts from the next column not matched on yet.
+        key={draft.comparisons.length}
         meta={meta}
         datasetA={datasetA}
         datasetB={datasetB}
-        taken={draft.comparisons.map((c) => c.id)}
-        first={draft.comparisons.length === 0}
-        onAdd={(c) => {
-          dispatch({ type: 'addComparison', comparison: c })
-          setExpanded(c.id)
-        }}
+        comparisons={draft.comparisons}
+        onAdd={(c) => dispatch({ type: 'addComparison', comparison: c })}
       />
     </div>
   )
@@ -126,10 +125,15 @@ function inferredType(dataset: DatasetMeta, column: string): ColumnType {
   return dataset.columns.find((c) => c.name === column)?.inferred_type ?? 'text'
 }
 
-function closestColumn(dataset: DatasetMeta, name: string): string {
+/** The column named like `name`, else the first one not matched on yet, else the first. */
+function closestColumn(dataset: DatasetMeta, name: string, used: Set<string>): string {
   const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, '')
+  const columns = dataset.columns.map((c) => c.name)
   return (
-    dataset.columns.find((c) => norm(c.name) === norm(name))?.name ?? dataset.columns[0]?.name ?? ''
+    columns.find((c) => norm(c) === norm(name)) ??
+    columns.find((c) => !used.has(c)) ??
+    columns[0] ??
+    ''
   )
 }
 
@@ -137,33 +141,36 @@ function AddComparison({
   meta,
   datasetA,
   datasetB,
-  taken,
-  first,
+  comparisons,
   onAdd,
 }: {
   meta: Meta
   datasetA: DatasetMeta
   datasetB: DatasetMeta
-  taken: string[]
-  first: boolean
+  comparisons: Comparison[]
   onAdd: (comparison: Comparison) => void
 }) {
-  const [columnA, setColumnA] = useState(datasetA.columns[0]?.name ?? '')
-  const [columnB, setColumnB] = useState(() => closestColumn(datasetB, columnA))
+  const usedA = new Set(comparisons.map((c) => c.column_a))
+  const usedB = new Set(comparisons.map((c) => c.column_b))
+  const [columnA, setColumnA] = useState(
+    () => datasetA.columns.find((c) => !usedA.has(c.name))?.name ?? datasetA.columns[0]?.name ?? '',
+  )
+  const [columnB, setColumnB] = useState(() => closestColumn(datasetB, columnA, usedB))
   const [type, setType] = useState<ColumnType>(() => inferredType(datasetA, columnA))
+  const duplicate = comparisons.some((c) => c.column_a === columnA && c.column_b === columnB)
 
   const pickA = (name: string) => {
     setColumnA(name)
-    setColumnB(closestColumn(datasetB, name))
+    setColumnB(closestColumn(datasetB, name, usedB))
     setType(inferredType(datasetA, name))
   }
 
   return (
-    <section className="card" aria-label="Add a comparison">
+    <section className="card" aria-label="Add a column pair">
       <div className="card-body stack">
-        {first && (
+        {comparisons.length === 0 && (
           <p className="muted">
-            No comparisons yet. Add one below, or let Auto-suggest propose a starting point.
+            No column pairs yet. Add the first one below, or let Auto-suggest propose some.
           </p>
         )}
         <div className="add-row">
@@ -193,12 +200,26 @@ function AddComparison({
           <button
             type="button"
             className="btn btn-primary"
-            disabled={!columnA || !columnB}
-            onClick={() => onAdd(makeComparison(meta, type, columnA, columnB, comparisonId(columnA, taken)))}
+            disabled={!columnA || !columnB || duplicate}
+            onClick={() =>
+              onAdd(
+                makeComparison(
+                  meta,
+                  type,
+                  columnA,
+                  columnB,
+                  comparisonId(
+                    columnA,
+                    comparisons.map((c) => c.id),
+                  ),
+                ),
+              )
+            }
           >
-            Add comparison
+            Add column pair
           </button>
         </div>
+        {duplicate && <span className="subtle">This pair is already in the list.</span>}
       </div>
     </section>
   )
@@ -245,7 +266,7 @@ function ComparisonCard({
     separateB && c.cleaning_b ? (c.cleaning_b as Record<string, unknown>) : cleaningA
 
   return (
-    <section className="card" aria-label={`Comparison ${c.column_a} and ${c.column_b}`}>
+    <section className="card" aria-label={`Column pair ${c.column_a} and ${c.column_b}`}>
       <div className="card-head comparison-head">
         <button
           type="button"
@@ -277,7 +298,7 @@ function ComparisonCard({
               onChange={(weight) => onChange({ ...c, weight })}
             />
           </label>
-          <RemoveButton label="Remove comparison" onClick={onRemove} />
+          <RemoveButton label={`Remove pair ${c.column_a} and ${c.column_b}`} onClick={onRemove} />
         </div>
       </div>
       {expanded && (

@@ -130,7 +130,7 @@ export function BlockingStep({
           type="button"
           className="btn"
           disabled={textComparisons.length === 0}
-          title={textComparisons.length === 0 ? 'Needs a text or category comparison' : undefined}
+          title={textComparisons.length === 0 ? 'Needs a text or category column pair' : undefined}
           onClick={() =>
             setRules([
               ...rules,
@@ -272,7 +272,7 @@ function KeyRuleEditor({
             <span className="and subtle">{i === 0 ? 'Where' : 'and'}</span>
             <select
               className="select"
-              aria-label="Comparison"
+              aria-label="Column pair"
               value={part.comparison_id}
               onChange={(e) => {
                 const nextType = types.get(e.target.value) ?? 'text'
@@ -363,7 +363,7 @@ function TfidfRuleEditor({
 }) {
   return (
     <div className="fields">
-      <Field label="Comparison">
+      <Field label="Column pair">
         <select
           className="select"
           value={rule.comparison_id}
