@@ -3,7 +3,7 @@ import { useRef, useState, type DragEvent } from 'react'
 import { api, unwrap, type DatasetMeta } from '../api/client'
 import { uploadDataset, useDataset, useRows } from '../api/hooks'
 import { DataTable } from '../components/DataTable'
-import { ErrorNotice, Field, Spinner } from '../components/ui'
+import { ErrorNotice, Field, Notice, Spinner } from '../components/ui'
 import type { Side } from '../draft'
 import { formatCount, formatPercent } from '../format'
 
@@ -17,7 +17,17 @@ const DELIMITERS = [
   { value: '|', label: 'Pipe (|)' },
 ]
 
-const ENCODINGS = ['utf-8', 'utf-16', 'cp1252', 'latin-1', 'iso8859-15', 'shift_jis', 'gb18030']
+const ENCODINGS = [
+  'utf-8',
+  'utf-16',
+  'cp1252',
+  'cp1250',
+  'cp1251',
+  'latin-1',
+  'iso8859-15',
+  'shift_jis',
+  'gb18030',
+]
 
 export function FilesStep({
   datasetA,
@@ -241,6 +251,11 @@ function DatasetDetails({
 
   return (
     <>
+      {parse.warnings?.map((w) => (
+        <Notice key={w} tone="warning">
+          {w}
+        </Notice>
+      ))}
       <div className="row">
         <span className="badge num">{formatCount(meta.rows)} rows</span>
         <span className="badge num">{meta.columns.length} columns</span>

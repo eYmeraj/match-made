@@ -707,6 +707,11 @@ export interface components {
             delimiter?: string | null;
             /** Encoding */
             encoding?: string | null;
+            /**
+             * Warnings
+             * @default []
+             */
+            warnings: string[];
         };
         /** ParseOptions */
         ParseOptions: {
@@ -769,8 +774,8 @@ export interface components {
             skipped_blocks: number;
             /** Skipped Pairs */
             skipped_pairs: number;
-            /** Upper Bound */
-            upper_bound: boolean;
+            /** Approximate */
+            approximate: boolean;
         };
         /** SuggestRequest */
         SuggestRequest: {
