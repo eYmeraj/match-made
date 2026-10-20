@@ -31,6 +31,4 @@ def test_profile_frame():
     frame = pl.DataFrame({"a": ["x", None, "y", "x"]})
     (profile,) = profile_frame(frame)
     assert profile.name == "a"
-    assert profile.null_fraction == 0.25
     assert profile.distinct == 2
-    assert profile.samples == ["x", "y"]

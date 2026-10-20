@@ -11,6 +11,7 @@ data/
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import uuid
@@ -26,6 +27,10 @@ from matchmade.schemas import MatchConfig
 
 
 class NotFoundError(LookupError):
+    pass
+
+
+class InUseError(ValueError):
     pass
 
 
@@ -93,6 +98,24 @@ class Storage:
         write_atomic(directory / "meta.json", meta.model_dump_json())
         return meta
 
+    def reparse_dataset(self, dataset_id: str, options: ParseOptions) -> DatasetMeta:
+        """Read the same upload with other options into a new dataset.
+
+        Jobs refer to datasets by id, so a dataset never changes once parsed.
+        """
+        current = self.dataset_meta(dataset_id)
+        source = self.source_path(dataset_id)
+        new_id_, directory = self.new_dataset_dir()
+        try:
+            try:
+                os.link(source, directory / source.name)  # sources are never modified
+            except OSError:
+                shutil.copy(source, directory / source.name)
+            return self.parse_dataset(new_id_, current.filename, options)
+        except Exception:
+            shutil.rmtree(directory)
+            raise
+
     def dataset_meta(self, dataset_id: str) -> DatasetMeta:
         path = self.dataset_dir(dataset_id) / "meta.json"
         if not path.exists():
@@ -103,7 +126,12 @@ class Storage:
         return pl.read_parquet(self.dataset_dir(dataset_id) / "data.parquet", columns=columns)
 
     def delete_dataset(self, dataset_id: str) -> None:
-        shutil.rmtree(self.dataset_dir(dataset_id))
+        directory = self.dataset_dir(dataset_id)
+        for config in (self.root / "jobs").glob("*/config.json"):
+            used = json.loads(config.read_text())
+            if dataset_id in (used["dataset_a"], used["dataset_b"]):
+                raise InUseError("A run uses this file, so it is kept for its results.")
+        shutil.rmtree(directory)
 
     # --- jobs -----------------------------------------------------------------------
 

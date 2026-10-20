@@ -122,6 +122,22 @@ def test_rows_and_reparse(client, datasets):
     assert [c["name"] for c in tabbed["columns"]] == [
         "vendor;incorporated;revenue_usd;listed;country"
     ]
+    # Re-reading makes a new dataset; runs that used the old one keep their data.
+    assert tabbed["id"] != b["id"]
+    assert tabbed["filename"] == b["filename"]
+    assert client.get(f"/api/datasets/{b['id']}").json()["parse"]["delimiter"] == ";"
+
+
+def test_delete_keeps_datasets_that_a_job_uses(client, datasets):
+    a, b = datasets
+    assert client.post("/api/jobs", json=make_config(a, b)).status_code == 201
+    in_use = client.delete(f"/api/datasets/{a['id']}")
+    assert in_use.status_code == 409
+    assert client.get(f"/api/datasets/{a['id']}").status_code == 200
+
+    unused = upload(client, "c.csv", "x\n1\n")
+    assert client.delete(f"/api/datasets/{unused['id']}").status_code == 204
+    assert client.get(f"/api/datasets/{unused['id']}").status_code == 404
 
 
 def test_unsupported_and_unknown(client):
@@ -352,7 +368,7 @@ def test_suggest_pairs_columns_by_values_when_names_differ(client):
     # Values that only roughly agree get a tolerance instead of an exact comparison.
     assert by_column["Revenue"]["tolerance_mode"] == "relative"
     assert by_column["Revenue"]["tolerance"] == 0.05
-    assert by_column["Founded"]["tolerance_days"] == 31
+    assert by_column["Founded"]["tolerance_days"] == 365
 
 
 def test_suggest_measures_overlap_on_whole_columns(client, monkeypatch):

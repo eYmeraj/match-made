@@ -36,7 +36,8 @@ services:
   web:
     build: ./frontend
     ports:
-      - "${MATCHMADE_PORT:-8080}:80"
+      # Single user, no auth: only this machine can reach the app.
+      - "127.0.0.1:${MATCHMADE_PORT:-8080}:80"
     depends_on:
       api:
         condition: service_healthy
