@@ -1,17 +1,25 @@
 import { expect, test, type Page } from '@playwright/test'
 import { readFile } from 'node:fs/promises'
 
-async function uploadFiles(page: Page) {
+/** Upload the two fixtures and go to the Compare step; returns their dataset ids. */
+async function uploadFiles(page: Page): Promise<string[]> {
   await page.goto('/')
-  await page.getByTestId('file-input').first().setInputFiles('e2e/fixtures/a.csv')
-  await expect(page.getByRole('region', { name: 'File A' })).toContainText('2,000 rows')
-  await page.getByTestId('file-input').first().setInputFiles('e2e/fixtures/b.csv')
-  await expect(page.getByRole('region', { name: 'File B' })).toContainText('2,000 rows')
+  const ids: string[] = []
+  for (const [file, card] of [
+    ['a.csv', 'File A'],
+    ['b.csv', 'File B'],
+  ]) {
+    const uploaded = page.waitForResponse((r) => r.url().endsWith('/api/datasets'))
+    await page.getByTestId('file-input').first().setInputFiles(`e2e/fixtures/${file}`)
+    ids.push((await (await uploaded).json()).id)
+    await expect(page.getByRole('region', { name: card })).toContainText('2,000 rows')
+  }
   await page.getByRole('button', { name: 'Continue to compare' }).click()
+  return ids
 }
 
 test('manual setup through to a downloaded merged file', async ({ page }) => {
-  await uploadFiles(page)
+  const datasetIds = await uploadFiles(page)
 
   // Manual configuration is the default: nothing is suggested until asked.
   await expect(page.getByText('No comparisons yet')).toBeVisible()
@@ -54,14 +62,38 @@ test('manual setup through to a downloaded merged file', async ({ page }) => {
 
   // Starting over keeps the uploads this run uses, so its link keeps working.
   const resultsUrl = page.url()
-  const deletes = [
-    page.waitForResponse((r) => r.request().method() === 'DELETE'),
-    page.waitForResponse((r) => r.request().method() === 'DELETE'),
-  ]
+  const deletes = datasetIds.map((id) =>
+    page.waitForResponse((r) => r.request().method() === 'DELETE' && r.url().endsWith(id)),
+  )
   await page.getByRole('button', { name: 'Start over' }).click()
   for (const response of await Promise.all(deletes)) expect(response.status()).toBe(409)
   await page.goto(resultsUrl)
   await expect(matches).toHaveText(count.toLocaleString('en-US'))
+  // The match table reads both uploaded files, so it only fills if they still exist.
+  await expect(page.locator('table.matches tbody tr')).toHaveCount(25)
+})
+
+test('number fields take what is typed after deleting the old value', async ({ page }) => {
+  await uploadFiles(page)
+  await page.getByLabel('Column in file A').selectOption('Company Name')
+  await page.getByRole('button', { name: 'Add comparison' }).click()
+
+  // Delete the default weight 1 and type 3, the way a person replaces a value.
+  const weight = page.locator('.weight input')
+  await weight.click()
+  await weight.press('End')
+  await weight.press('Backspace')
+  await expect(weight).toHaveValue('')
+  await weight.pressSequentially('3')
+  await expect(weight).toHaveValue('3')
+  await weight.blur()
+  await expect(weight).toHaveValue('3')
+
+  // A value outside the allowed range is not taken; leaving the field restores the last one.
+  await weight.fill('500')
+  await expect(weight).toHaveAttribute('aria-invalid', 'true')
+  await weight.blur()
+  await expect(weight).toHaveValue('3')
 })
 
 test('replacing a file deletes the unused upload', async ({ page }) => {
@@ -90,4 +122,21 @@ test('auto-suggest proposes the matching column pairs', async ({ page }) => {
   ])
   await page.getByRole('button', { name: 'Continue to blocking' }).click()
   await expect(page.getByRole('heading', { name: /Rule 1 · Similar text/ })).toBeVisible()
+})
+
+test('a guessed encoding is shown with examples to check', async ({ page }) => {
+  await page.goto('/')
+  // Latin-1 bytes, as in a Windows "CSV" export; accented rows come late in the file.
+  const rows = Array.from({ length: 20_000 }, (_, i) => `Plain Company ${i},Boston`)
+  const csv = ['name,city', ...rows, 'Müller GmbH,München', 'São Paulo Ltda,São Paulo', ''].join('\n')
+  await page.getByTestId('file-input').first().setInputFiles({
+    name: 'windows.csv',
+    mimeType: 'text/csv',
+    buffer: Buffer.from(csv, 'latin1'),
+  })
+  const card = page.getByRole('region', { name: 'File A' })
+  await expect(card).toContainText('20,002 rows')
+  await expect(card.getByRole('combobox', { name: 'Encoding' })).toHaveValue('cp1252')
+  await expect(card).toContainText('encoding was guessed as cp1252')
+  await expect(card).toContainText('“Müller GmbH”')
 })

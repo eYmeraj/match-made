@@ -11,6 +11,7 @@ import {
   type Schemas,
   type TfidfRule,
 } from '../api/client'
+import { NumberField } from '../components/NumberField'
 import { ErrorNotice, Field, Notice, RemoveButton, Spinner } from '../components/ui'
 import {
   needsParam,
@@ -146,8 +147,8 @@ export function BlockingStep({
           <div className="titles">
             <h3>Candidate pairs</h3>
             <span className="subtle">
-              Large key blocks (often blank or very common values) are skipped above{' '}
-              <span className="num">{formatCount(draft.maxBlockPairs)}</span> pairs.
+              Values so common that they would create more than{' '}
+              <span className="num">{formatCount(draft.maxBlockPairs)}</span> pairs are skipped.
             </span>
           </div>
           <button
@@ -160,17 +161,15 @@ export function BlockingStep({
           </button>
         </div>
         <div className="card-body stack">
-          <Field label="Skip key blocks larger than (pairs)">
-            <input
+          <Field label="Skip values that create more than (pairs)">
+            <NumberField
               className="input num"
               style={{ maxWidth: 200 }}
-              type="number"
               min={1}
+              integer
               step={100000}
               value={draft.maxBlockPairs}
-              onChange={(e) =>
-                dispatch({ type: 'setMaxBlockPairs', value: Math.max(1, Math.round(Number(e.target.value) || 1)) })
-              }
+              onChange={(value) => dispatch({ type: 'setMaxBlockPairs', value })}
             />
           </Field>
           {stale && <span className="subtle">The setup changed since the last estimate.</span>}
@@ -184,8 +183,8 @@ export function BlockingStep({
 
 function RuleBadge({ estimate }: { estimate: Estimate['rules'][number] }) {
   return (
-    <span className="badge badge-accent num" title={estimate.upper_bound ? 'Upper bound' : undefined}>
-      {estimate.upper_bound ? '≤ ' : ''}
+    <span className="badge badge-accent num" title={estimate.approximate ? 'Estimate' : undefined}>
+      {estimate.approximate ? 'about ' : ''}
       {formatCount(estimate.pairs)} pairs
     </span>
   )
@@ -195,8 +194,11 @@ function EstimateSummary({ estimate, hasRules }: { estimate: Estimate; hasRules:
   const total = hasRules
     ? estimate.rules.reduce((sum, r) => sum + r.pairs, 0)
     : estimate.all_pairs
-  // Rules are OR-ed and may overlap, so a sum over several rules is only an upper bound.
-  const bound = hasRules && (estimate.rules.length > 1 || estimate.rules.some((r) => r.upper_bound))
+  // Similar text counts are estimates. Rules are OR-ed and may overlap, so a sum over
+  // several exact rules is an upper bound.
+  const approximate = hasRules && estimate.rules.some((r) => r.approximate)
+  const bound = hasRules && estimate.rules.length > 1
+  const uncertain = approximate || bound
   const skipped = estimate.rules.reduce((sum, r) => sum + r.skipped_blocks, 0)
   const over = total > estimate.max_candidates
   return (
@@ -205,7 +207,7 @@ function EstimateSummary({ estimate, hasRules }: { estimate: Estimate; hasRules:
         <div className="tile">
           <span className="label">Pairs to score</span>
           <div className="value">
-            {bound ? '≤ ' : ''}
+            {approximate ? 'about ' : bound ? '≤ ' : ''}
             {formatCount(total)}
           </div>
           <span className="sub">
@@ -221,16 +223,17 @@ function EstimateSummary({ estimate, hasRules }: { estimate: Estimate; hasRules:
         </div>
       </div>
       {over && (
-        <Notice tone={bound ? 'warning' : 'error'}>
-          {bound ? 'This may be' : 'This is'} above the limit. Make the rules more specific
-          {estimate.rules.some((r) => r.upper_bound) ? ', or lower Top matches per value' : ''}.
+        <Notice tone={uncertain ? 'warning' : 'error'}>
+          {uncertain ? 'This may be' : 'This is'} above the limit. Make the rules more specific
+          {approximate ? ', or lower Top matches per value' : ''}.
         </Notice>
       )}
       {skipped > 0 && (
         <Notice tone="warning">
-          {formatCount(skipped)} oversized key block{skipped === 1 ? '' : 's'} will be skipped (
-          {formatCount(estimate.rules.reduce((s, r) => s + r.skipped_pairs, 0))} pairs). Rows that
-          only share such a key will not be compared by that rule.
+          {formatCount(skipped)} value{skipped === 1 ? ' is' : 's are'} too common to compare and
+          will be skipped ({formatCount(estimate.rules.reduce((s, r) => s + r.skipped_pairs, 0))}{' '}
+          pairs), often placeholders such as “N/A” or “Unknown”. Rows that only share such a
+          value are not compared by that rule.
         </Notice>
       )}
     </div>
@@ -303,18 +306,16 @@ function KeyRuleEditor({
               ))}
             </select>
             {needsParam(part.transform) ? (
-              <input
+              <NumberField
                 className="input num"
                 aria-label={part.transform === 'prefix' ? 'Characters' : 'Bucket size'}
                 title={part.transform === 'prefix' ? 'Characters' : 'Bucket size'}
-                type="number"
-                min={part.transform === 'prefix' ? 1 : 0}
+                // Buckets must be larger than 0; a prefix is a whole number of characters.
+                min={part.transform === 'prefix' ? 1 : Number.MIN_VALUE}
+                integer={part.transform === 'prefix'}
                 step={part.transform === 'prefix' ? 1 : 'any'}
-                value={part.param ?? ''}
-                onChange={(e) => {
-                  const v = Number(e.target.value)
-                  setPart(i, { ...part, param: v > 0 ? v : null })
-                }}
+                value={part.param ?? null}
+                onChange={(param) => setPart(i, { ...part, param })}
               />
             ) : (
               <span />
@@ -372,28 +373,23 @@ function TfidfRuleEditor({
         </select>
       </Field>
       <Field label="Top matches per value" hint="1–100; higher finds more, costs more">
-        <input
+        <NumberField
           className="input num"
-          type="number"
           min={1}
           max={100}
+          integer
           value={rule.top_k}
-          onChange={(e) =>
-            onChange({ ...rule, top_k: Math.min(100, Math.max(1, Math.round(Number(e.target.value) || 1))) })
-          }
+          onChange={(top_k) => onChange({ ...rule, top_k })}
         />
       </Field>
       <Field label="Minimum similarity" hint="0–0.99 cosine">
-        <input
+        <NumberField
           className="input num"
-          type="number"
           min={0}
           max={0.99}
           step={0.05}
           value={rule.min_similarity}
-          onChange={(e) =>
-            onChange({ ...rule, min_similarity: Math.min(0.99, Math.max(0, Number(e.target.value) || 0)) })
-          }
+          onChange={(min_similarity) => onChange({ ...rule, min_similarity })}
         />
       </Field>
     </div>

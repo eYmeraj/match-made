@@ -3,6 +3,7 @@ import { useState, type Dispatch } from 'react'
 import { api, unwrap, type ColumnType, type Comparison, type DatasetMeta, type Meta } from '../api/client'
 import { CleaningOptions } from '../components/CleaningOptions'
 import { CleaningPreview } from '../components/CleaningPreview'
+import { NumberField } from '../components/NumberField'
 import { ErrorNotice, Field, Notice, RemoveButton, Spinner } from '../components/ui'
 import { changeType, comparisonId, makeComparison, type Draft, type DraftAction } from '../draft'
 
@@ -267,14 +268,13 @@ function ComparisonCard({
         <div className="row" style={{ flexWrap: 'nowrap' }}>
           <label className="weight">
             <span className="subtle">Weight</span>
-            <input
+            <NumberField
               className="input num"
-              type="number"
               min={0.1}
               max={100}
               step={0.5}
               value={c.weight}
-              onChange={(e) => onChange({ ...c, weight: Math.max(0.1, Number(e.target.value) || 1) })}
+              onChange={(weight) => onChange({ ...c, weight })}
             />
           </label>
           <RemoveButton label="Remove comparison" onClick={onRemove} />
@@ -407,16 +407,12 @@ function SimilarityFields({
       return (
         <>
           <Field label="Tolerance" hint="Score falls to 0 at this difference">
-            <input
+            <NumberField
               className="input num"
-              type="number"
               min={0}
               step="any"
               value={shown}
-              onChange={(e) => {
-                const v = Math.max(0, Number(e.target.value) || 0)
-                onChange({ ...c, tolerance: relative ? v / 100 : v })
-              }}
+              onChange={(v) => onChange({ ...c, tolerance: relative ? v / 100 : v })}
             />
           </Field>
           <Field label="Measured as">
@@ -435,13 +431,12 @@ function SimilarityFields({
     case 'date':
       return (
         <Field label="Tolerance (days)" hint="Score falls to 0 at this difference">
-          <input
+          <NumberField
             className="input num"
-            type="number"
             min={0}
-            step={1}
+            integer
             value={c.tolerance_days ?? 0}
-            onChange={(e) => onChange({ ...c, tolerance_days: Math.max(0, Math.round(Number(e.target.value) || 0)) })}
+            onChange={(days) => onChange({ ...c, tolerance_days: days })}
           />
         </Field>
       )

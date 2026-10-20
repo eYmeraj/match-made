@@ -135,6 +135,8 @@ function Workspace({ meta }: { meta: Meta }) {
   }
 
   const startOver = () => {
+    // A run that has not finished would otherwise keep the only worker busy, unseen.
+    if (job.data?.state === 'queued' || job.data?.state === 'running') cancel.mutate(job.data.id)
     for (const id of [draft.datasetA, draft.datasetB]) if (id) discardDataset(id)
     selectJob(null)
     dispatch({ type: 'reset' })
