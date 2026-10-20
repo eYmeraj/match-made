@@ -47,7 +47,13 @@ export type DraftAction =
   | { type: 'load'; config: MatchConfig }
   | { type: 'reset' }
 
-export function draftReducer(draft: Draft, action: DraftAction): Draft {
+/** Allowed blocking key transforms per column type, as served by /api/meta. */
+export type Transforms = Meta['transforms']
+
+export function draftReducer(draft: Draft, action: DraftAction, transforms: Transforms): Draft {
+  const reconcile = (rules: BlockingRule[], comparisons: Comparison[]) =>
+    reconcileRules(rules, comparisons, transforms)
+
   switch (action.type) {
     case 'setDataset': {
       const key = action.side === 'a' ? 'datasetA' : 'datasetB'
@@ -57,7 +63,7 @@ export function draftReducer(draft: Draft, action: DraftAction): Draft {
       const columns = new Set(action.dataset.columns.map((c) => c.name))
       const column = action.side === 'a' ? 'column_a' : 'column_b'
       const kept = draft.comparisons.filter((c) => columns.has(c[column]))
-      return { ...next, comparisons: kept, rules: reconcileRules(draft.rules, kept) }
+      return { ...next, comparisons: kept, rules: reconcile(draft.rules, kept) }
     }
     case 'addComparison':
       return { ...draft, comparisons: [...draft.comparisons, action.comparison] }
@@ -65,20 +71,20 @@ export function draftReducer(draft: Draft, action: DraftAction): Draft {
       const comparisons = draft.comparisons.map((c) =>
         c.id === action.id ? action.comparison : c,
       )
-      return { ...draft, comparisons, rules: reconcileRules(draft.rules, comparisons) }
+      return { ...draft, comparisons, rules: reconcile(draft.rules, comparisons) }
     }
     case 'removeComparison': {
       const comparisons = draft.comparisons.filter((c) => c.id !== action.id)
-      return { ...draft, comparisons, rules: reconcileRules(draft.rules, comparisons) }
+      return { ...draft, comparisons, rules: reconcile(draft.rules, comparisons) }
     }
     case 'replaceSetup':
       return {
         ...draft,
         comparisons: action.comparisons,
-        rules: reconcileRules(action.rules, action.comparisons),
+        rules: reconcile(action.rules, action.comparisons),
       }
     case 'setRules':
-      return { ...draft, rules: reconcileRules(action.rules, draft.comparisons) }
+      return { ...draft, rules: reconcile(action.rules, draft.comparisons) }
     case 'setMaxBlockPairs':
       return { ...draft, maxBlockPairs: action.value }
     case 'setRun':
@@ -99,17 +105,8 @@ export function draftReducer(draft: Draft, action: DraftAction): Draft {
   }
 }
 
-// Mirrors the backend's allowed transforms; the server stays the authority.
-const TRANSFORMS: Record<ColumnType, KeyPart['transform'][]> = {
-  text: ['exact', 'prefix', 'first_token', 'sorted_tokens', 'phonetic'],
-  categorical: ['exact', 'prefix', 'first_token', 'phonetic'],
-  number: ['exact', 'round'],
-  date: ['exact', 'year', 'year_month'],
-  boolean: ['exact'],
-}
-
-export function transformsFor(type: ColumnType): KeyPart['transform'][] {
-  return TRANSFORMS[type]
+export function transformsFor(transforms: Transforms, type: ColumnType): KeyPart['transform'][] {
+  return transforms[type] ?? []
 }
 
 export function needsParam(transform: KeyPart['transform']): boolean {
@@ -125,7 +122,11 @@ export function supportsTfidf(type: ColumnType): boolean {
  * removed comparison are dropped, and transforms invalid for a changed type fall back to
  * exact. Rules left with nothing to block on are removed.
  */
-export function reconcileRules(rules: BlockingRule[], comparisons: Comparison[]): BlockingRule[] {
+export function reconcileRules(
+  rules: BlockingRule[],
+  comparisons: Comparison[],
+  transforms: Transforms,
+): BlockingRule[] {
   const types = new Map(comparisons.map((c) => [c.id, c.type]))
   const result: BlockingRule[] = []
   for (const rule of rules) {
@@ -137,7 +138,7 @@ export function reconcileRules(rules: BlockingRule[], comparisons: Comparison[])
     const parts = rule.parts.flatMap((part): KeyPart[] => {
       const type = types.get(part.comparison_id)
       if (!type) return []
-      if (transformsFor(type).includes(part.transform)) return [part]
+      if (transformsFor(transforms, type).includes(part.transform)) return [part]
       return [{ comparison_id: part.comparison_id, transform: 'exact', param: null }]
     })
     if (parts.length > 0) result.push({ ...rule, parts })

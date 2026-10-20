@@ -1,9 +1,9 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { useEffect, useReducer, useState } from 'react'
-import { api, unwrap } from './api/client'
+import { ApiError, api, discardDataset, unwrap, type Meta } from './api/client'
 import { useDataset, useJob, useJobConfig, useMeta } from './api/hooks'
 import { ErrorNotice, Spinner } from './components/ui'
-import { draftReducer, emptyDraft, toConfig, type Draft } from './draft'
+import { draftReducer, emptyDraft, toConfig, type Draft, type DraftAction } from './draft'
 import { BlockingStep } from './steps/BlockingStep'
 import { ComparisonsStep } from './steps/ComparisonsStep'
 import { FilesStep } from './steps/FilesStep'
@@ -43,12 +43,36 @@ function setJobInUrl(id: string | null) {
 }
 
 export default function App() {
-  const [draft, dispatch] = useReducer(draftReducer, undefined, loadDraft)
+  const meta = useMeta()
+  if (meta.isPending) {
+    return (
+      <div className="page">
+        <Spinner label="Connecting…" />
+      </div>
+    )
+  }
+  if (meta.isError) {
+    return (
+      <div className="page">
+        <ErrorNotice error={new Error(`Cannot reach the Match Made server. ${meta.error.message}`)} />
+      </div>
+    )
+  }
+  return <Workspace meta={meta.data} />
+}
+
+const isNotFound = (error: unknown) => error instanceof ApiError && error.status === 404
+
+function Workspace({ meta }: { meta: Meta }) {
+  const [draft, dispatch] = useReducer(
+    (state: Draft, action: DraftAction) => draftReducer(state, action, meta.transforms),
+    undefined,
+    loadDraft,
+  )
   const [jobId, setJobId] = useState<string | null>(jobFromUrl)
   const [chosenStep, setStep] = useState<Step>(jobId ? 'run' : 'files')
   const queryClient = useQueryClient()
 
-  const meta = useMeta()
   const datasetA = useDataset(draft.datasetA)
   const datasetB = useDataset(draft.datasetB)
   const job = useJob(jobId)
@@ -67,11 +91,14 @@ export default function App() {
     if (jobConfig.data) dispatch({ type: 'load', config: jobConfig.data })
   }, [jobConfig.data])
 
-  // A dataset deleted on the server (or a stale session) is dropped from the draft.
+  // A dataset deleted on the server (or a stale session) is dropped from the draft. Other
+  // errors, such as the API restarting, are retried rather than losing the upload.
+  const goneA = isNotFound(datasetA.error)
+  const goneB = isNotFound(datasetB.error)
   useEffect(() => {
-    if (datasetA.isError) dispatch({ type: 'setDataset', side: 'a', dataset: null })
-    if (datasetB.isError) dispatch({ type: 'setDataset', side: 'b', dataset: null })
-  }, [datasetA.isError, datasetB.isError])
+    if (goneA) dispatch({ type: 'setDataset', side: 'a', dataset: null })
+    if (goneB) dispatch({ type: 'setDataset', side: 'b', dataset: null })
+  }, [goneA, goneB])
 
   const jobState = job.data?.state
   // A finished run shows its results; the run page only tracks progress.
@@ -108,6 +135,7 @@ export default function App() {
   }
 
   const startOver = () => {
+    for (const id of [draft.datasetA, draft.datasetB]) if (id) discardDataset(id)
     selectJob(null)
     dispatch({ type: 'reset' })
     setStep('files')
@@ -127,21 +155,6 @@ export default function App() {
   const next = order[index + 1] as Step | undefined
   // While a job exists the setup is frozen; editing starts a new run.
   const locked = !!jobId && step !== 'results'
-
-  if (meta.isPending) {
-    return (
-      <div className="page">
-        <Spinner label="Connecting…" />
-      </div>
-    )
-  }
-  if (meta.isError) {
-    return (
-      <div className="page">
-        <ErrorNotice error={new Error(`Cannot reach the Match Made server. ${meta.error.message}`)} />
-      </div>
-    )
-  }
 
   return (
     <>
@@ -195,20 +208,28 @@ export default function App() {
           <FilesStep
             datasetA={draft.datasetA}
             datasetB={draft.datasetB}
-            onChange={(side, dataset) => dispatch({ type: 'setDataset', side, dataset })}
+            onChange={(side, dataset) => {
+              // A replaced, re-read or removed upload is no longer needed.
+              const previous = side === 'a' ? draft.datasetA : draft.datasetB
+              if (previous && previous !== dataset?.id) discardDataset(previous)
+              dispatch({ type: 'setDataset', side, dataset })
+            }}
           />
         )}
         {step === 'compare' && haveFiles && (
           <ComparisonsStep
             draft={draft}
             dispatch={dispatch}
-            meta={meta.data}
+            meta={meta}
             datasetA={datasetA.data}
             datasetB={datasetB.data}
           />
         )}
         {step === 'blocking' && haveFiles && (
-          <BlockingStep draft={draft} dispatch={dispatch} rowsA={datasetA.data.rows} rowsB={datasetB.data.rows} />
+          <BlockingStep
+            draft={draft}
+            dispatch={dispatch}
+            transforms={meta.transforms} rowsA={datasetA.data.rows} rowsB={datasetB.data.rows} />
         )}
         {step === 'run' &&
           (jobId ? (

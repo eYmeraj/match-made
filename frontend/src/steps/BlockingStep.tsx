@@ -19,6 +19,7 @@ import {
   transformsFor,
   type Draft,
   type DraftAction,
+  type Transforms,
 } from '../draft'
 import { formatCount } from '../format'
 
@@ -38,11 +39,13 @@ const TRANSFORMS: Record<KeyPart['transform'], string> = {
 export function BlockingStep({
   draft,
   dispatch,
+  transforms,
   rowsA,
   rowsB,
 }: {
   draft: Draft
   dispatch: Dispatch<DraftAction>
+  transforms: Transforms
   rowsA: number
   rowsB: number
 }) {
@@ -95,7 +98,12 @@ export function BlockingStep({
           </div>
           <div className="card-body">
             {rule.kind === 'key' ? (
-              <KeyRuleEditor rule={rule} comparisons={draft.comparisons} onChange={(r) => update(i, r)} />
+              <KeyRuleEditor
+                rule={rule}
+                comparisons={draft.comparisons}
+                transforms={transforms}
+                onChange={(r) => update(i, r)}
+              />
             ) : (
               <TfidfRuleEditor rule={rule} comparisons={textComparisons} onChange={(r) => update(i, r)} />
             )}
@@ -240,10 +248,12 @@ function comparisonOptions(comparisons: Comparison[]) {
 function KeyRuleEditor({
   rule,
   comparisons,
+  transforms,
   onChange,
 }: {
   rule: KeyRule
   comparisons: Comparison[]
+  transforms: Transforms
   onChange: (rule: KeyRule) => void
 }) {
   const types = new Map(comparisons.map((c) => [c.id, c.type]))
@@ -263,7 +273,7 @@ function KeyRuleEditor({
               value={part.comparison_id}
               onChange={(e) => {
                 const nextType = types.get(e.target.value) ?? 'text'
-                const keep = transformsFor(nextType).includes(part.transform)
+                const keep = transformsFor(transforms, nextType).includes(part.transform)
                 setPart(i, {
                   comparison_id: e.target.value,
                   transform: keep ? part.transform : 'exact',
@@ -286,7 +296,7 @@ function KeyRuleEditor({
                 })
               }}
             >
-              {transformsFor(type).map((t) => (
+              {transformsFor(transforms, type).map((t) => (
                 <option key={t} value={t}>
                   {TRANSFORMS[t]}
                 </option>

@@ -51,6 +51,31 @@ test('manual setup through to a downloaded merged file', async ({ page }) => {
   await page.reload()
   await expect(page.getByRole('heading', { name: 'Results' })).toBeVisible()
   await expect(matches).toHaveText(count.toLocaleString('en-US'))
+
+  // Starting over keeps the uploads this run uses, so its link keeps working.
+  const resultsUrl = page.url()
+  const deletes = [
+    page.waitForResponse((r) => r.request().method() === 'DELETE'),
+    page.waitForResponse((r) => r.request().method() === 'DELETE'),
+  ]
+  await page.getByRole('button', { name: 'Start over' }).click()
+  for (const response of await Promise.all(deletes)) expect(response.status()).toBe(409)
+  await page.goto(resultsUrl)
+  await expect(matches).toHaveText(count.toLocaleString('en-US'))
+})
+
+test('replacing a file deletes the unused upload', async ({ page }) => {
+  await page.goto('/')
+  await page.getByTestId('file-input').first().setInputFiles('e2e/fixtures/a.csv')
+  const fileA = page.getByRole('region', { name: 'File A' })
+  await expect(fileA).toContainText('2,000 rows')
+
+  const deleted = page.waitForResponse((r) => r.request().method() === 'DELETE')
+  await fileA.locator('input[type=file]').setInputFiles('e2e/fixtures/b.csv')
+  await expect(fileA).toContainText('b.csv')
+  const response = await deleted
+  expect(response.status()).toBe(204)
+  expect((await page.request.get(response.url())).status()).toBe(404)
 })
 
 test('auto-suggest proposes the matching column pairs', async ({ page }) => {

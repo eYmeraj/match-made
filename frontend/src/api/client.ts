@@ -21,6 +21,11 @@ export type JoinMode = Schemas['JoinMode']
 
 export const api = createClient<paths>({ baseUrl: '' })
 
+/** Delete an upload that is no longer needed; the server keeps it (409) while a run uses it. */
+export function discardDataset(id: string): void {
+  api.DELETE('/api/datasets/{dataset_id}', { params: { path: { dataset_id: id } } }).catch(() => {})
+}
+
 export class ApiError extends Error {
   readonly status: number
 
