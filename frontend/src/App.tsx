@@ -14,7 +14,7 @@ type Step = 'files' | 'compare' | 'blocking' | 'run' | 'results'
 
 const STEPS: { id: Step; label: string; title: string; intro: string }[] = [
   { id: 'files', label: 'Files', title: 'Upload two files', intro: 'Rows in file A are matched against rows in file B.' },
-  { id: 'compare', label: 'Compare', title: 'Choose what to compare', intro: '' },
+  { id: 'compare', label: 'Compare', title: 'Choose the columns to match on', intro: '' },
   { id: 'blocking', label: 'Blocking', title: 'Limit which pairs are scored', intro: '' },
   { id: 'run', label: 'Run', title: 'Run matching', intro: 'Set how strict matching is and how many matches each row may have.' },
   { id: 'results', label: 'Results', title: 'Results', intro: 'Tune the threshold, check borderline matches and download the files.' },

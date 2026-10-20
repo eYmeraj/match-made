@@ -18,16 +18,23 @@ async function uploadFiles(page: Page): Promise<string[]> {
   return ids
 }
 
+async function addPair(page: Page, columnA: string, columnB: string, type: string) {
+  const form = page.getByRole('region', { name: 'Add a column pair' })
+  await form.getByLabel('Column in file A').selectOption(columnA)
+  await form.getByLabel('Column in file B').selectOption(columnB)
+  await form.getByLabel('Compare as').selectOption({ label: type })
+  await form.getByRole('button', { name: 'Add column pair' }).click()
+}
+
 test('manual setup through to a downloaded merged file', async ({ page }) => {
   const datasetIds = await uploadFiles(page)
 
   // Manual configuration is the default: nothing is suggested until asked.
-  await expect(page.getByText('No comparisons yet')).toBeVisible()
-  await page.getByLabel('Column in file A').selectOption('Company Name')
-  await page.getByLabel('Column in file B').selectOption('vendor')
-  await page.getByRole('button', { name: 'Add comparison' }).click()
+  await expect(page.getByText('No column pairs yet')).toBeVisible()
+  await addPair(page, 'Company Name', 'vendor', 'Text')
 
-  const comparison = page.getByRole('region', { name: 'Comparison Company Name and vendor' })
+  const comparison = page.getByRole('region', { name: 'Column pair Company Name and vendor' })
+  await comparison.getByRole('button', { expanded: false }).click()
   await comparison.getByLabel('Remove legal suffixes').check()
   await expect(comparison.getByRole('cell', { name: 'jaskos first', exact: true })).toBeVisible()
 
@@ -75,8 +82,7 @@ test('manual setup through to a downloaded merged file', async ({ page }) => {
 
 test('number fields take what is typed after deleting the old value', async ({ page }) => {
   await uploadFiles(page)
-  await page.getByLabel('Column in file A').selectOption('Company Name')
-  await page.getByRole('button', { name: 'Add comparison' }).click()
+  await addPair(page, 'Company Name', 'vendor', 'Text')
 
   // Delete the default weight 1 and type 3, the way a person replaces a value.
   const weight = page.locator('.weight input')
@@ -139,4 +145,55 @@ test('a guessed encoding is shown with examples to check', async ({ page }) => {
   await expect(card.getByRole('combobox', { name: 'Encoding' })).toHaveValue('cp1252')
   await expect(card).toContainText('encoding was guessed as cp1252')
   await expect(card).toContainText('“Müller GmbH”')
+})
+
+test('match on any number of column pairs, added and removed freely', async ({ page }) => {
+  await uploadFiles(page)
+  await addPair(page, 'Company Name', 'vendor', 'Text')
+  await addPair(page, 'Founded', 'incorporated', 'Date')
+  await addPair(page, 'Revenue', 'annual_revenue', 'Number')
+  await addPair(page, 'City', 'city', 'Category')
+  const pairs = page.locator('.disclosure .pair')
+  await expect(pairs).toHaveText([
+    'Company Name↔vendor',
+    'Founded↔incorporated',
+    'Revenue↔annual_revenue',
+    'City↔city',
+  ])
+
+  // After each pair the form offers a column not matched on yet; an exact repeat is refused.
+  const form = page.getByRole('region', { name: 'Add a column pair' })
+  await expect(form.getByLabel('Column in file A')).toHaveValue('company_id')
+  await form.getByLabel('Column in file A').selectOption('Company Name')
+  await form.getByLabel('Column in file B').selectOption('vendor')
+  await expect(form.getByRole('button', { name: 'Add column pair' })).toBeDisabled()
+  await expect(form).toContainText('This pair is already in the list.')
+
+  await page.getByRole('button', { name: 'Remove pair City and city' }).click()
+  await expect(pairs).toHaveText([
+    'Company Name↔vendor',
+    'Founded↔incorporated',
+    'Revenue↔annual_revenue',
+  ])
+
+  await page.getByRole('button', { name: 'Continue to blocking' }).click()
+  await page.getByRole('button', { name: '+ Similar text rule' }).click()
+  await page.getByRole('button', { name: 'Continue to run' }).click()
+  await page.getByRole('button', { name: 'Run matching' }).click()
+  await expect(page.getByRole('heading', { name: 'Results' })).toBeVisible({ timeout: 60_000 })
+
+  // Every remaining pair, and only those, is scored, shown and exported.
+  await expect(page.locator('table.matches th.group')).toHaveText([
+    'Company Name ↔ vendor',
+    'Founded ↔ incorporated',
+    'Revenue ↔ annual_revenue',
+  ])
+  const downloading = page.waitForEvent('download')
+  await page.getByRole('button', { name: 'Merged file' }).click()
+  const header = (await readFile((await (await downloading).path())!, 'utf8')).split('\n')[0]
+  expect(header.split(',').filter((c) => c.startsWith('score: '))).toEqual([
+    'score: Company Name ~ vendor',
+    'score: Founded ~ incorporated',
+    'score: Revenue ~ annual_revenue',
+  ])
 })
