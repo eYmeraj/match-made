@@ -12,13 +12,15 @@ plus one ``c_<comparison id>`` column per comparison with the cleaned, typed val
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 import jellyfish
 import numpy as np
 import polars as pl
+import scipy.sparse as sp
 from sklearn.feature_extraction.text import TfidfVectorizer
-from sparse_dot_topn import sp_matmul_topn
+from sparse_dot_topn import sp_matmul_topn, zip_sp_matmul_topn
 
 from matchmade.schemas import (
     Blocking,
@@ -30,6 +32,9 @@ from matchmade.schemas import (
 )
 
 ROW = "__row"
+
+# Called with the completed fraction (0-1) of the current step.
+ProgressFn = Callable[[float], None]
 
 
 def value_column(comparison_id: str) -> str:
@@ -146,8 +151,72 @@ def _key_pairs(blocks: _KeyBlocks, n_parts: int) -> pl.DataFrame:
 
 # --- TF-IDF rules -------------------------------------------------------------------
 
+# Exact top-k cosine over all A x B value pairs costs sum_f df_a(f) * df_b(f), which reaches
+# ~1e12 at a million rows because common n-grams are shared by tens of thousands of values.
+# Instead, candidates are the B values sharing the most of each A value's rarest n-grams
+# (each row keeps at most _RARE_FEATURES), then re-ranked by the full cosine. Oversampling
+# before re-ranking recovers neighbours whose rare n-grams happen to differ.
+_RARE_FEATURES = 12
+_OVERSAMPLE = 4
+# Chunking bounds memory and keeps each thread's accumulator over B values cache-sized.
+_CHUNK_A = 50_000
+_CHUNK_B = 100_000
 
-def _tfidf_pairs(a: pl.DataFrame, b: pl.DataFrame, rule: TfidfBlockingRule) -> pl.DataFrame:
+
+def _n_rows(m: sp.csr_matrix) -> int:
+    return len(m.indptr) - 1
+
+
+def _rarest_features(m: sp.csr_matrix, idf: np.ndarray, k: int) -> sp.csr_matrix:
+    """Binary matrix keeping each row's k highest-idf features."""
+    rows = np.repeat(np.arange(_n_rows(m)), np.diff(m.indptr))
+    order = np.lexsort((-idf[m.indices], rows))
+    rank = np.arange(len(order)) - m.indptr[rows[order]]
+    keep = np.sort(order[rank < k])
+    indptr = np.concatenate([[0], np.cumsum(np.bincount(rows[keep], minlength=_n_rows(m)))])
+    return sp.csr_matrix(
+        (np.ones(len(keep), dtype=np.float32), m.indices[keep], indptr), shape=m.shape
+    )
+
+
+def _nearest_values(
+    ma: sp.csr_matrix,
+    mb: sp.csr_matrix,
+    idf: np.ndarray,
+    rule: TfidfBlockingRule,
+    on_progress: ProgressFn,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Row indices into ma and mb of each A value's top-k neighbours by cosine."""
+    rare_a = _rarest_features(ma, idf, _RARE_FEATURES)
+    rare_b = _rarest_features(mb, idf, _RARE_FEATURES)
+    n_a, n_b = _n_rows(ma), _n_rows(mb)
+    b_chunks = [rare_b[s : s + _CHUNK_B].T.tocsr() for s in range(0, n_b, _CHUNK_B)]
+    n_candidates = rule.top_k * _OVERSAMPLE
+    found_a, found_b = [], []
+    for start in range(0, n_a, _CHUNK_A):
+        stop = min(start + _CHUNK_A, n_a)
+        parts = [
+            sp_matmul_topn(rare_a[start:stop], chunk, top_n=n_candidates, n_threads=-1)
+            for chunk in b_chunks
+        ]
+        shared = (parts[0] if len(parts) == 1 else zip_sp_matmul_topn(n_candidates, parts)).tocoo()
+        cosine = np.asarray(ma[start:stop][shared.row].multiply(mb[shared.col]).sum(axis=1))
+        best = (
+            pl.DataFrame({"a": shared.row + start, "b": shared.col, "s": cosine.ravel()})
+            .filter(pl.col("s") >= rule.min_similarity)
+            .sort("a", "s", descending=[False, True])
+            .group_by("a", maintain_order=True)
+            .head(rule.top_k)
+        )
+        found_a.append(best.get_column("a").to_numpy())
+        found_b.append(best.get_column("b").to_numpy())
+        on_progress(stop / n_a)
+    return np.concatenate(found_a), np.concatenate(found_b)
+
+
+def _tfidf_pairs(
+    a: pl.DataFrame, b: pl.DataFrame, rule: TfidfBlockingRule, on_progress: ProgressFn
+) -> pl.DataFrame:
     col = value_column(rule.comparison_id)
     a_rows = a.select(ROW, pl.col(col).cast(pl.String).alias("v")).drop_nulls()
     b_rows = b.select(ROW, pl.col(col).cast(pl.String).alias("v")).drop_nulls()
@@ -155,6 +224,7 @@ def _tfidf_pairs(a: pl.DataFrame, b: pl.DataFrame, rule: TfidfBlockingRule) -> p
     b_values = b_rows.get_column("v").unique(maintain_order=True)
     empty = pl.DataFrame(schema={"a": pl.UInt32, "b": pl.UInt32})
     if a_values.is_empty() or b_values.is_empty():
+        on_progress(1.0)
         return empty
 
     vectorizer = TfidfVectorizer(
@@ -164,20 +234,13 @@ def _tfidf_pairs(a: pl.DataFrame, b: pl.DataFrame, rule: TfidfBlockingRule) -> p
         sublinear_tf=True,
     )
     vectorizer.fit(pl.concat([a_values, b_values]).unique().to_list())
-    ma = vectorizer.transform(a_values.to_list())
-    mb = vectorizer.transform(b_values.to_list())
-    product = sp_matmul_topn(
-        ma, mb.T, top_n=rule.top_k, threshold=rule.min_similarity, n_threads=-1
-    ).tocoo()
-    if product.nnz == 0:
+    ma = vectorizer.transform(a_values.to_list()).tocsr()
+    mb = vectorizer.transform(b_values.to_list()).tocsr()
+    rows, cols = _nearest_values(ma, mb, vectorizer.idf_, rule, on_progress)
+    if len(rows) == 0:
         return empty
 
-    value_pairs = pl.DataFrame(
-        {
-            "va": a_values.gather(product.row.astype(np.int64)),
-            "vb": b_values.gather(product.col.astype(np.int64)),
-        }
-    )
+    value_pairs = pl.DataFrame({"va": a_values.gather(rows), "vb": b_values.gather(cols)})
     return (
         value_pairs.join(a_rows.rename({ROW: "a", "v": "va"}), on="va")
         .join(b_rows.rename({ROW: "b", "v": "vb"}), on="vb")
@@ -211,17 +274,26 @@ def estimate(a: pl.DataFrame, b: pl.DataFrame, blocking: Blocking) -> list[RuleS
 
 
 def _rule_pairs(
-    a: pl.DataFrame, b: pl.DataFrame, rule: BlockingRule, index: int, max_block_pairs: int
+    a: pl.DataFrame,
+    b: pl.DataFrame,
+    rule: BlockingRule,
+    index: int,
+    max_block_pairs: int,
+    on_progress: ProgressFn,
 ) -> tuple[pl.DataFrame, RuleStats]:
     if isinstance(rule, ExactBlockingRule):
         blocks = _key_blocks(a, b, rule, max_block_pairs)
         return _key_pairs(blocks, len(rule.parts)), _rule_stats_from_sizes(index, blocks.sizes)
-    pairs = _tfidf_pairs(a, b, rule)
+    pairs = _tfidf_pairs(a, b, rule, on_progress)
     return pairs, RuleStats(rule_index=index, pairs=pairs.height)
 
 
 def candidate_pairs(
-    a: pl.DataFrame, b: pl.DataFrame, blocking: Blocking, max_candidates: int
+    a: pl.DataFrame,
+    b: pl.DataFrame,
+    blocking: Blocking,
+    max_candidates: int,
+    on_progress: ProgressFn = lambda _: None,
 ) -> BlockingResult:
     if not blocking.rules:
         total = a.height * b.height
@@ -242,10 +314,16 @@ def candidate_pairs(
             )
 
     frames, stats = [], []
+    n_rules = len(blocking.rules)
     for i, rule in enumerate(blocking.rules):
-        pairs, stat = _rule_pairs(a, b, rule, i, blocking.max_block_pairs)
+
+        def rule_progress(fraction: float, i: int = i) -> None:
+            on_progress((i + fraction) / n_rules)
+
+        pairs, stat = _rule_pairs(a, b, rule, i, blocking.max_block_pairs, rule_progress)
         frames.append(pairs.cast({"a": pl.UInt32, "b": pl.UInt32}))
         stats.append(stat)
+        rule_progress(1.0)
 
     pairs = pl.concat(frames).unique()
     if pairs.height > max_candidates:

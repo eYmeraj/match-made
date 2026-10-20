@@ -57,7 +57,9 @@ def run_match(storage: Storage, job_id: str, settings: Settings, report: Progres
     lap("clean")
 
     stage("block", 0)
-    blocked = candidate_pairs(a, b, config.blocking, settings.max_candidates)
+    blocked = candidate_pairs(
+        a, b, config.blocking, settings.max_candidates, on_progress=lambda f: stage("block", f)
+    )
     lap("block")
 
     stage("score", 0)

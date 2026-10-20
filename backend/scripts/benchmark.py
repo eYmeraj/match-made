@@ -57,7 +57,7 @@ def main() -> None:
     print(f"upload+parse+profile: {time.perf_counter() - t0:.1f}s")
 
     rules = {
-        "tfidf": [TfidfBlockingRule(comparison_id="name", top_k=5, min_similarity=0.5)],
+        "tfidf": [TfidfBlockingRule(comparison_id="name")],
         "key": [
             ExactBlockingRule(
                 parts=[
