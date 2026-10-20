@@ -1118,29 +1118,16 @@
           "inferred_type": {
             "$ref": "#/components/schemas/ColumnType"
           },
-          "null_fraction": {
-            "type": "number",
-            "title": "Null Fraction"
-          },
           "distinct": {
             "type": "integer",
             "title": "Distinct"
-          },
-          "samples": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array",
-            "title": "Samples"
           }
         },
         "type": "object",
         "required": [
           "name",
           "inferred_type",
-          "null_fraction",
-          "distinct",
-          "samples"
+          "distinct"
         ],
         "title": "ColumnProfile"
       },
@@ -1639,7 +1626,7 @@
           "transforms": {
             "additionalProperties": {
               "items": {
-                "type": "string"
+                "$ref": "#/components/schemas/KeyTransform"
               },
               "type": "array"
             },
@@ -1648,13 +1635,6 @@
             },
             "type": "object",
             "title": "Transforms"
-          },
-          "metrics": {
-            "items": {
-              "$ref": "#/components/schemas/TextMetric"
-            },
-            "type": "array",
-            "title": "Metrics"
           },
           "default_cleaning": {
             "additionalProperties": {
@@ -1666,23 +1646,12 @@
             },
             "type": "object",
             "title": "Default Cleaning"
-          },
-          "keep_margin": {
-            "type": "number",
-            "title": "Keep Margin"
-          },
-          "max_candidates": {
-            "type": "integer",
-            "title": "Max Candidates"
           }
         },
         "type": "object",
         "required": [
           "transforms",
-          "metrics",
-          "default_cleaning",
-          "keep_margin",
-          "max_candidates"
+          "default_cleaning"
         ],
         "title": "Meta"
       },

@@ -9,13 +9,13 @@ import {
   toConfig,
 } from './draft'
 
-const meta = {
-  transforms: {},
-  metrics: [],
+const meta: Meta = {
+  transforms: {
+    text: ['exact', 'first_token', 'phonetic', 'prefix', 'sorted_tokens'],
+    date: ['exact', 'year', 'year_month'],
+  },
   default_cleaning: { text: { lowercase: true }, date: { day_first: false } },
-  keep_margin: 25,
-  max_candidates: 100,
-} as unknown as Meta
+}
 
 const name = makeComparison(meta, 'text', 'Name', 'vendor', 'name')
 const founded = makeComparison(meta, 'date', 'Founded', 'incorporated', 'founded')
@@ -41,7 +41,7 @@ describe('reconcileRules', () => {
       { kind: 'key', parts: [{ comparison_id: 'gone', transform: 'exact', param: null }] },
       { kind: 'tfidf', comparison_id: 'gone', top_k: 10, min_similarity: 0.3 },
     ]
-    expect(reconcileRules(rules, [name])).toEqual([
+    expect(reconcileRules(rules, [name], meta.transforms)).toEqual([
       { kind: 'key', parts: [{ comparison_id: 'name', transform: 'first_token', param: null }] },
     ])
   })
@@ -52,7 +52,7 @@ describe('reconcileRules', () => {
       { kind: 'key', parts: [{ comparison_id: 'name', transform: 'prefix', param: 3 }] },
       { kind: 'tfidf', comparison_id: 'name', top_k: 10, min_similarity: 0.3 },
     ]
-    expect(reconcileRules(rules, [asDate])).toEqual([
+    expect(reconcileRules(rules, [asDate], meta.transforms)).toEqual([
       { kind: 'key', parts: [{ comparison_id: 'name', transform: 'exact', param: null }] },
     ])
   })
@@ -62,7 +62,7 @@ describe('draftReducer', () => {
   it('keeps comparisons whose columns exist in a replacement file', () => {
     const draft = { ...emptyDraft, comparisons: [name, founded] }
     const dataset = { id: 'b2', columns: [{ name: 'vendor' }] } as DatasetMeta
-    const next = draftReducer(draft, { type: 'setDataset', side: 'b', dataset })
+    const next = draftReducer(draft, { type: 'setDataset', side: 'b', dataset }, meta.transforms)
     expect(next.datasetB).toBe('b2')
     expect(next.comparisons.map((c) => c.id)).toEqual(['name'])
   })

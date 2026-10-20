@@ -422,12 +422,8 @@ export interface components {
             /** Name */
             name: string;
             inferred_type: components["schemas"]["ColumnType"];
-            /** Null Fraction */
-            null_fraction: number;
             /** Distinct */
             distinct: number;
-            /** Samples */
-            samples: string[];
         };
         /**
          * ColumnType
@@ -622,20 +618,14 @@ export interface components {
         Meta: {
             /** Transforms */
             transforms: {
-                [key: string]: string[];
+                [key: string]: components["schemas"]["KeyTransform"][];
             };
-            /** Metrics */
-            metrics: components["schemas"]["TextMetric"][];
             /** Default Cleaning */
             default_cleaning: {
                 [key: string]: {
                     [key: string]: unknown;
                 };
             };
-            /** Keep Margin */
-            keep_margin: number;
-            /** Max Candidates */
-            max_candidates: number;
         };
         /**
          * MissingPolicy
