@@ -6,6 +6,9 @@ import random
 import polars as pl
 import pytest
 
+from matchmade.schemas import DateComparison, KeyTransform, NumberComparison
+from matchmade.suggest import suggest_key_rule
+
 A_CSV = """id,Company Name,Founded,Revenue,Public,Country
 1,Acme Widgets Inc.,2001-03-15,1200000,true,US
 2,Globex Corporation,1989-07-01,98000000,true,US
@@ -350,3 +353,29 @@ def test_suggest_pairs_columns_by_values_when_names_differ(client):
     assert by_column["Revenue"]["tolerance_mode"] == "relative"
     assert by_column["Revenue"]["tolerance"] == 0.05
     assert by_column["Founded"]["tolerance_days"] == 31
+
+
+def test_suggest_measures_overlap_on_whole_columns(client, monkeypatch):
+    # In big files the first rows of A and B rarely describe the same entities.
+    monkeypatch.setattr("matchmade.suggest._SAMPLE_ROWS", 20)
+    a_csv, b_csv = _noisy_pairs()
+    header, *rows = b_csv.strip().split("\n")
+    random.Random(1).shuffle(rows)
+    a = upload(client, "a.csv", a_csv)
+    b = upload(client, "b.csv", "\n".join([header, *rows]) + "\n")
+
+    suggestion = client.post(
+        "/api/suggest", json={"dataset_a": a["id"], "dataset_b": b["id"]}
+    ).json()
+    pairs = {c["column_a"]: c["column_b"] for c in suggestion["comparisons"]}
+    assert pairs["Company Name"] == "vendor"
+
+
+def test_suggested_key_blocking_avoids_approximate_comparisons(storage):
+    comparisons = [
+        NumberComparison(id="n", column_a="x", column_b="y", tolerance=0.05),
+        DateComparison(id="d", column_a="p", column_b="q", tolerance_days=31),
+    ]
+    rule = suggest_key_rule(comparisons, distinct={"x": 10_000, "p": 5_000})
+    assert rule is not None
+    assert [(p.comparison_id, p.transform) for p in rule.parts] == [("d", KeyTransform.YEAR)]
