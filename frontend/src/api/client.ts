@@ -3,7 +3,6 @@ import type { components, paths } from './schema'
 
 export type Schemas = components['schemas']
 export type DatasetMeta = Schemas['DatasetMeta']
-export type ColumnProfile = Schemas['ColumnProfile']
 export type ColumnType = Schemas['ColumnType']
 export type Comparison = Schemas['MatchConfig']['comparisons'][number]
 export type BlockingRule = NonNullable<Schemas['Blocking']['rules']>[number]
