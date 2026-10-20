@@ -15,7 +15,6 @@ from matchmade.schemas import (
     BlockingKeyPart,
     BooleanComparison,
     CategoricalComparison,
-    Cleaning,
     ColumnType,
     Comparison,
     DateCleaning,
@@ -29,6 +28,8 @@ from matchmade.schemas import (
 )
 from matchmade.storage import Storage
 
+# Rows used to detect date formats; value overlap always uses whole columns, because in
+# large files the first rows of A and B rarely describe the same entities.
 _SAMPLE_ROWS = 20_000
 _MIN_PAIR_SCORE = 0.35
 _MIN_DISTINCT_FOR_OVERLAP = 3
@@ -39,9 +40,8 @@ _EXACT_AGREEMENT = 0.9
 _NUMBER_TOLERANCE = 0.05
 _DATE_TOLERANCE_DAYS = 31
 _FUZZY_PROBES = 100
-_FUZZY_TARGETS = 2_000
 _FUZZY_MATCH = 85
-_ORGANISATION_CLEANING = TextCleaning(remove_legal_suffixes=True, expand_abbreviations=True)
+_OVERLAP_TEXT_CLEANING = TextCleaning(remove_legal_suffixes=True)
 # Below this many row pairs, comparing everything is cheaper than blocking.
 _FULL_COMPARE_LIMIT = 1_000_000
 
@@ -70,23 +70,39 @@ def _compatible(a: ColumnType, b: ColumnType) -> ColumnType | None:
     return None
 
 
-def _cleaned_uniques(values: pl.Series, column_type: ColumnType) -> pl.Series:
+class _Uniques:
+    """Distinct cleaned values per whole column, computed once per suggestion."""
+
+    def __init__(self, frame: pl.DataFrame) -> None:
+        self._frame = frame
+        self._cache: dict[tuple[str, ColumnType], pl.Series] = {}
+
+    def get(self, column: str, column_type: ColumnType) -> pl.Series:
+        key = (column, column_type)
+        if key not in self._cache:
+            values = self._frame.get_column(column).drop_nulls().unique()
+            self._cache[key] = _normalised(values, column_type).drop_nulls().unique()
+        return self._cache[key]
+
+
+def _normalised(values: pl.Series, column_type: ColumnType) -> pl.Series:
+    v = pl.col("v")
     match column_type:
         case ColumnType.TEXT:
-            cleaning: Cleaning = _ORGANISATION_CLEANING
+            # Abbreviation expansion is left out: it triples the cost on millions of values,
+            # and the fuzzy probe tolerates what it would fix.
+            expr = clean(v, column_type, _OVERLAP_TEXT_CLEANING)
         case ColumnType.DATE:
-            cleaning = DateCleaning(day_first=_looks_day_first(values))
+            expr = clean(v, column_type, DateCleaning(day_first=_looks_day_first(values)))
         case _:
-            cleaning = DEFAULT_CLEANING[column_type]()
-    frame = pl.DataFrame({"v": values}).select(clean(pl.col("v"), column_type, cleaning))
-    return frame.to_series().drop_nulls().unique()
+            expr = clean(v, column_type, DEFAULT_CLEANING[column_type]())
+    return pl.DataFrame({"v": values}).select(expr).to_series()
 
 
-def _value_overlap(a: pl.Series, b: pl.Series, column_type: ColumnType) -> float:
+def _value_overlap(ua: pl.Series, ub: pl.Series, column_type: ColumnType) -> float:
     """Share of A's distinct values that also occur (fuzzily, for text) in B."""
     if column_type == ColumnType.BOOLEAN:
         return 0.0  # two possible values overlap trivially
-    ua, ub = _cleaned_uniques(a, column_type), _cleaned_uniques(b, column_type)
     min_distinct = (
         _MIN_DISTINCT_NUMBERS_FOR_OVERLAP
         if column_type == ColumnType.NUMBER
@@ -94,12 +110,15 @@ def _value_overlap(a: pl.Series, b: pl.Series, column_type: ColumnType) -> float
     )
     if min(len(ua), len(ub)) < min_distinct:
         return 0.0
-    if column_type == ColumnType.TEXT:
-        probe = ua.sample(min(len(ua), _FUZZY_PROBES), seed=0).to_list()
-        targets = ub.sample(min(len(ub), _FUZZY_TARGETS), seed=0).to_list()
-        best = cdist(probe, targets, scorer=fuzz.token_sort_ratio, workers=-1).max(axis=1)
-        return float((best >= _FUZZY_MATCH).mean())
-    return len(set(ua.to_list()) & set(ub.to_list())) / min(len(ua), len(ub))
+    exact = int(ua.is_in(ub.implode()).sum()) / len(ua)
+    if column_type != ColumnType.TEXT or exact >= _MIN_PAIR_SCORE:
+        return exact
+    # Typos and formatting hide exact matches; probe a sample of A against all of B.
+    probe = ua.sample(min(len(ua), _FUZZY_PROBES), seed=0).to_list()
+    best = cdist(
+        probe, ub.to_list(), scorer=fuzz.token_sort_ratio, score_cutoff=_FUZZY_MATCH, workers=-1
+    ).max(axis=1)
+    return max(exact, float((best >= _FUZZY_MATCH).mean()))
 
 
 def _looks_day_first(values: pl.Series) -> bool:
@@ -157,8 +176,9 @@ def _comparison(
 
 def suggest_comparisons(storage: Storage, dataset_a: str, dataset_b: str) -> list[Comparison]:
     meta_a, meta_b = storage.dataset_meta(dataset_a), storage.dataset_meta(dataset_b)
-    sample_a = storage.read_dataset(dataset_a).head(_SAMPLE_ROWS)
-    sample_b = storage.read_dataset(dataset_b).head(_SAMPLE_ROWS)
+    frame_a, frame_b = storage.read_dataset(dataset_a), storage.read_dataset(dataset_b)
+    sample_a, sample_b = frame_a.head(_SAMPLE_ROWS), frame_b.head(_SAMPLE_ROWS)
+    uniques_a, uniques_b = _Uniques(frame_a), _Uniques(frame_b)
 
     scored: list[tuple[float, float, ColumnProfile, ColumnProfile, ColumnType]] = []
     for pa in meta_a.columns:
@@ -167,7 +187,11 @@ def suggest_comparisons(storage: Storage, dataset_a: str, dataset_b: str) -> lis
             if column_type is None:
                 continue
             name = _name_similarity(pa.name, pb.name)
-            overlap = _value_overlap(sample_a[pa.name], sample_b[pb.name], column_type)
+            overlap = _value_overlap(
+                uniques_a.get(pa.name, column_type),
+                uniques_b.get(pb.name, column_type),
+                column_type,
+            )
             # Either a similar name or shared values is evidence on its own.
             score = max(name, overlap)
             if score >= _MIN_PAIR_SCORE:
@@ -196,6 +220,34 @@ def suggest_comparisons(storage: Storage, dataset_a: str, dataset_b: str) -> lis
     ]
 
 
+def _is_exact(comparison: Comparison) -> bool:
+    if isinstance(comparison, NumberComparison):
+        return comparison.tolerance == 0
+    if isinstance(comparison, DateComparison):
+        return comparison.tolerance_days == 0
+    return True
+
+
+def suggest_key_rule(
+    comparisons: list[Comparison], distinct: dict[str, int]
+) -> ExactBlockingRule | None:
+    """Block on the most selective comparison an exact key cannot break."""
+    exact = [c for c in comparisons if _is_exact(c) and c.type != ColumnType.BOOLEAN]
+    if exact:
+        best = max(exact, key=lambda c: distinct.get(c.column_a, 0))
+        return ExactBlockingRule(
+            parts=[BlockingKeyPart(comparison_id=best.id, transform=KeyTransform.EXACT)]
+        )
+    # Dates within a tolerance mostly still share their year.
+    dates = [c for c in comparisons if c.type == ColumnType.DATE]
+    if dates:
+        best = max(dates, key=lambda c: distinct.get(c.column_a, 0))
+        return ExactBlockingRule(
+            parts=[BlockingKeyPart(comparison_id=best.id, transform=KeyTransform.YEAR)]
+        )
+    return None
+
+
 def suggest_blocking(
     storage: Storage, dataset_a: str, dataset_b: str, comparisons: list[Comparison]
 ) -> Blocking:
@@ -209,11 +261,5 @@ def suggest_blocking(
     if texts:
         best = max(texts, key=lambda c: (c.weight, meta_a[c.column_a].distinct))
         return Blocking(rules=[TfidfBlockingRule(comparison_id=best.id)])
-    best = max(comparisons, key=lambda c: meta_a[c.column_a].distinct)
-    return Blocking(
-        rules=[
-            ExactBlockingRule(
-                parts=[BlockingKeyPart(comparison_id=best.id, transform=KeyTransform.EXACT)]
-            )
-        ]
-    )
+    rule = suggest_key_rule(comparisons, {name: p.distinct for name, p in meta_a.items()})
+    return Blocking(rules=[rule] if rule else [])

@@ -89,6 +89,28 @@ def execute(job_id: str) -> None:
         raise
 
 
+_STAGE_NAMES = {
+    "load": "loading",
+    "clean": "cleaning",
+    "block": "finding candidate pairs",
+    "score": "scoring",
+}
+
+
+def failure_message(exc_string: str | None, stage: str | None) -> str:
+    """Explain a job that died outside our own error handling (killed or timed out)."""
+    during = f" while {_STAGE_NAMES[stage]}" if stage in _STAGE_NAMES else ""
+    exc = exc_string or ""
+    if "signal 9" in exc or "SIGKILL" in exc:
+        return (
+            f"The worker ran out of memory{during}. Give the worker more memory "
+            "(e.g. Docker's memory limit), or make blocking more specific."
+        )
+    if "JobTimeoutException" in exc:
+        return f"The run hit its time limit{during}."
+    return f"The run stopped unexpectedly{during}."
+
+
 def status(storage: Storage, connection: Redis, job_id: str) -> JobStatus:
     job_dir = storage.job_dir(job_id)
     if (job_dir / "summary.json").exists():
@@ -113,7 +135,9 @@ def status(storage: Storage, connection: Redis, job_id: str) -> JobStatus:
         case RqStatus.STOPPED | RqStatus.CANCELED:
             return JobStatus(id=job_id, state="cancelled", stage=stage, progress=progress)
         case RqStatus.FAILED:
-            return JobStatus(id=job_id, state="failed", error="The job failed or timed out")
+            result = rq_job.latest_result()
+            error = failure_message(result.exc_string if result else None, stage)
+            return JobStatus(id=job_id, state="failed", stage=stage, error=error)
         case _:
             # FINISHED without summary.json means the summary write is still landing.
             return JobStatus(id=job_id, state="running", stage=stage, progress=progress)
