@@ -1,8 +1,13 @@
 import datetime as dt
+import random
 
+import numpy as np
 import polars as pl
 import pytest
+import scipy.sparse as sp
+from sklearn.feature_extraction.text import TfidfVectorizer
 
+from matchmade import blocking
 from matchmade.blocking import ROW, BlockingError, candidate_pairs, derive_key, estimate
 from matchmade.schemas import (
     Blocking,
@@ -130,3 +135,64 @@ def test_tfidf_with_no_values():
     b = frame(name=["x"])
     rule = TfidfBlockingRule(comparison_id="name")
     assert candidate_pairs(a, b, Blocking(rules=[rule]), max_candidates=100).pairs.is_empty()
+
+
+def test_rarest_features_keeps_the_highest_idf_features_per_row_as_binary():
+    m = sp.csr_matrix(np.array([[0.5, 0.2, 0.9, 0.1], [0.3, 0.0, 0.0, 0.4]], dtype=np.float32))
+    idf = np.array([1.0, 4.0, 2.0, 3.0])
+    rare = blocking._rarest_features(m, idf, 2).toarray()
+    assert rare.tolist() == [[0, 1, 0, 1], [1, 0, 0, 1]]
+
+
+def _random_names(rng: random.Random, n: int) -> list[str]:
+    syllables = ["ka", "lo", "mi", "ne", "ru", "sa", "ti", "vo", "ze", "pa"]
+    return ["".join(rng.choices(syllables, k=rng.randint(2, 4))) for _ in range(n)]
+
+
+def _exact_top_k(a_values, b_values, top_k, min_similarity):
+    vectorizer = TfidfVectorizer(analyzer="char_wb", ngram_range=(3, 3), sublinear_tf=True)
+    vectorizer.fit(sorted(set(a_values) | set(b_values)))
+    ma = sp.csr_matrix(vectorizer.transform(a_values))
+    mb = sp.csr_matrix(vectorizer.transform(b_values))
+    cosine = (ma @ mb.T).toarray()
+    expected = set()
+    for i, row in enumerate(cosine):
+        for j in np.argsort(-row, kind="stable")[:top_k]:
+            if row[j] >= min_similarity:
+                expected.add((i, int(j)))
+    return expected
+
+
+def test_tfidf_matches_exact_top_k_when_pruning_is_lossless():
+    # Names this short have at most 10 trigrams, so no feature is pruned and the
+    # candidate search must agree with the exact cosine top-k (up to ties).
+    rng = random.Random(7)
+    a_values = list(dict.fromkeys(_random_names(rng, 300)))
+    b_values = list(dict.fromkeys(_random_names(rng, 300)))
+    rule = TfidfBlockingRule(comparison_id="name", top_k=3, min_similarity=0.4)
+    result = candidate_pairs(
+        frame(name=a_values), frame(name=b_values), Blocking(rules=[rule]), max_candidates=10**6
+    )
+    found = set(result.pairs.iter_rows())
+    expected = _exact_top_k(a_values, b_values, top_k=3, min_similarity=0.4)
+    assert len(found ^ expected) <= 0.02 * len(expected)
+
+
+def test_tfidf_results_do_not_depend_on_chunking(monkeypatch):
+    rng = random.Random(11)
+    a = frame(name=_random_names(rng, 400))
+    b = frame(name=_random_names(rng, 500))
+    blocks = Blocking(rules=[TfidfBlockingRule(comparison_id="name", top_k=5, min_similarity=0.3)])
+    whole = candidate_pairs(a, b, blocks, max_candidates=10**6)
+    monkeypatch.setattr(blocking, "_CHUNK_A", 37)
+    monkeypatch.setattr(blocking, "_CHUNK_B", 53)
+    progress: list[float] = []
+    chunked = candidate_pairs(a, b, blocks, max_candidates=10**6, on_progress=progress.append)
+    # Ties between equally rare candidates can resolve differently across chunks.
+    assert (
+        len(set(whole.pairs.iter_rows()) ^ set(chunked.pairs.iter_rows()))
+        <= 0.02 * whole.pairs.height
+    )
+    assert progress == sorted(progress)
+    assert len(progress) > 5
+    assert progress[-1] == 1.0
