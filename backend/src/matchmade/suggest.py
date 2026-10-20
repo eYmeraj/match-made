@@ -30,8 +30,14 @@ from matchmade.schemas import (
 from matchmade.storage import Storage
 
 _SAMPLE_ROWS = 20_000
-_MIN_PAIR_SCORE = 0.55
+_MIN_PAIR_SCORE = 0.35
 _MIN_DISTINCT_FOR_OVERLAP = 3
+# Columns of small integers (codes, counts) share values by chance.
+_MIN_DISTINCT_NUMBERS_FOR_OVERLAP = 50
+# Numbers or dates that mostly agree, but not exactly, get a tolerance.
+_EXACT_AGREEMENT = 0.9
+_NUMBER_TOLERANCE = 0.05
+_DATE_TOLERANCE_DAYS = 31
 _FUZZY_PROBES = 100
 _FUZZY_TARGETS = 2_000
 _FUZZY_MATCH = 85
@@ -81,7 +87,12 @@ def _value_overlap(a: pl.Series, b: pl.Series, column_type: ColumnType) -> float
     if column_type == ColumnType.BOOLEAN:
         return 0.0  # two possible values overlap trivially
     ua, ub = _cleaned_uniques(a, column_type), _cleaned_uniques(b, column_type)
-    if min(len(ua), len(ub)) < _MIN_DISTINCT_FOR_OVERLAP:
+    min_distinct = (
+        _MIN_DISTINCT_NUMBERS_FOR_OVERLAP
+        if column_type == ColumnType.NUMBER
+        else _MIN_DISTINCT_FOR_OVERLAP
+    )
+    if min(len(ua), len(ub)) < min_distinct:
         return 0.0
     if column_type == ColumnType.TEXT:
         probe = ua.sample(min(len(ua), _FUZZY_PROBES), seed=0).to_list()
@@ -101,8 +112,10 @@ def _comparison(
     column_a: str,
     column_b: str,
     column_type: ColumnType,
+    overlap: float,
     day_first: tuple[bool, bool] = (False, False),
 ) -> Comparison:
+    approximate = overlap < _EXACT_AGREEMENT
     names = f"{_normalise_name(column_a)} {_normalise_name(column_b)}"
     match column_type:
         case ColumnType.TEXT:
@@ -117,7 +130,13 @@ def _comparison(
                 ),
             )
         case ColumnType.NUMBER:
-            return NumberComparison(id=cid, column_a=column_a, column_b=column_b)
+            return NumberComparison(
+                id=cid,
+                column_a=column_a,
+                column_b=column_b,
+                tolerance=_NUMBER_TOLERANCE if approximate else 0.0,
+                tolerance_mode="relative" if approximate else "absolute",
+            )
         case ColumnType.DATE:
             day_first_a, day_first_b = day_first
             return DateComparison(
@@ -128,6 +147,7 @@ def _comparison(
                 cleaning_b=DateCleaning(day_first=day_first_b)
                 if day_first_b != day_first_a
                 else None,
+                tolerance_days=_DATE_TOLERANCE_DAYS if approximate else 0,
             )
         case ColumnType.BOOLEAN:
             return BooleanComparison(id=cid, column_a=column_a, column_b=column_b)
@@ -140,7 +160,7 @@ def suggest_comparisons(storage: Storage, dataset_a: str, dataset_b: str) -> lis
     sample_a = storage.read_dataset(dataset_a).head(_SAMPLE_ROWS)
     sample_b = storage.read_dataset(dataset_b).head(_SAMPLE_ROWS)
 
-    scored: list[tuple[float, ColumnProfile, ColumnProfile, ColumnType]] = []
+    scored: list[tuple[float, float, ColumnProfile, ColumnProfile, ColumnType]] = []
     for pa in meta_a.columns:
         for pb in meta_b.columns:
             column_type = _compatible(pa.inferred_type, pb.inferred_type)
@@ -148,29 +168,31 @@ def suggest_comparisons(storage: Storage, dataset_a: str, dataset_b: str) -> lis
                 continue
             name = _name_similarity(pa.name, pb.name)
             overlap = _value_overlap(sample_a[pa.name], sample_b[pb.name], column_type)
-            score = max(name, 0.6 * name + 0.6 * overlap)
+            # Either a similar name or shared values is evidence on its own.
+            score = max(name, overlap)
             if score >= _MIN_PAIR_SCORE:
-                scored.append((score, pa, pb, column_type))
+                scored.append((score, overlap, pa, pb, column_type))
 
     used_a: set[str] = set()
     used_b: set[str] = set()
-    chosen: list[tuple[ColumnProfile, ColumnProfile, ColumnType]] = []
-    for _, pa, pb, column_type in sorted(scored, key=lambda s: -s[0]):
+    chosen: list[tuple[float, ColumnProfile, ColumnProfile, ColumnType]] = []
+    for _, overlap, pa, pb, column_type in sorted(scored, key=lambda s: -s[0]):
         if pa.name not in used_a and pb.name not in used_b:
             used_a.add(pa.name)
             used_b.add(pb.name)
-            chosen.append((pa, pb, column_type))
+            chosen.append((overlap, pa, pb, column_type))
     order = {p.name: i for i, p in enumerate(meta_a.columns)}
-    chosen.sort(key=lambda c: order[c[0].name])
+    chosen.sort(key=lambda c: order[c[1].name])
     return [
         _comparison(
             f"c{i + 1}",
             pa.name,
             pb.name,
             t,
+            overlap,
             day_first=(_looks_day_first(sample_a[pa.name]), _looks_day_first(sample_b[pb.name])),
         )
-        for i, (pa, pb, t) in enumerate(chosen)
+        for i, (overlap, pa, pb, t) in enumerate(chosen)
     ]
 
 

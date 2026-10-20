@@ -1,5 +1,7 @@
 import csv
+import datetime as dt
 import io
+import random
 
 import polars as pl
 import pytest
@@ -311,3 +313,40 @@ def test_cancel_queued_job(client, datasets):
     a, b = datasets
     job_id = client.post("/api/jobs", json=make_config(a, b)).json()["id"]
     assert client.post(f"/api/jobs/{job_id}/cancel").json()["state"] == "cancelled"
+
+
+def _noisy_pairs(n: int = 300, seed: int = 3):
+    """A and B describe the same companies under unrelated column names, with noise."""
+    rng = random.Random(seed)
+    syllables = ["kor", "vex", "lum", "tra", "nio", "pel", "zar", "qui", "mon", "dra"]
+    a_lines = ["company_id,Company Name,Founded,Revenue"]
+    b_lines = ["vendor;incorporated;turnover"]
+    for i in range(n):
+        name = " ".join("".join(rng.choices(syllables, k=3)).title() for _ in range(2))
+        day = dt.date(1950, 1, 1) + dt.timedelta(days=rng.randrange(25_000))
+        revenue = rng.randrange(10_000, 50_000_000)
+        a_lines.append(f"A{i:07d},{name} Ltd,{day.isoformat()},{revenue}")
+        shifted = day + dt.timedelta(days=rng.choice([0, 0, 3, -20]))
+        noisy_revenue = round(revenue * rng.uniform(0.98, 1.02))
+        b_lines.append(f"{name.upper()};{shifted.strftime('%d/%m/%Y')};{noisy_revenue}")
+    return "\n".join(a_lines) + "\n", "\n".join(b_lines) + "\n"
+
+
+def test_suggest_pairs_columns_by_values_when_names_differ(client):
+    a_csv, b_csv = _noisy_pairs()
+    a, b = upload(client, "a.csv", a_csv), upload(client, "b.csv", b_csv)
+    assert {c["name"]: c["inferred_type"] for c in a["columns"]}["company_id"] == "text"
+
+    suggestion = client.post(
+        "/api/suggest", json={"dataset_a": a["id"], "dataset_b": b["id"]}
+    ).json()
+    by_column = {c["column_a"]: c for c in suggestion["comparisons"]}
+    assert {k: v["column_b"] for k, v in by_column.items()} == {
+        "Company Name": "vendor",
+        "Founded": "incorporated",
+        "Revenue": "turnover",
+    }
+    # Values that only roughly agree get a tolerance instead of an exact comparison.
+    assert by_column["Revenue"]["tolerance_mode"] == "relative"
+    assert by_column["Revenue"]["tolerance"] == 0.05
+    assert by_column["Founded"]["tolerance_days"] == 31
