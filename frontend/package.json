@@ -11,7 +11,7 @@
     "test": "vitest run",
     "e2e": "playwright test",
     "preview": "vite preview",
-    "gen:api": "cd ../backend && uv run python scripts/export_openapi.py ../frontend/src/api/openapi.json && cd ../frontend && openapi-typescript src/api/openapi.json -o src/api/schema.ts"
+    "gen:api": "cd ../backend && uv run python scripts/export_openapi.py ../frontend/node_modules/.tmp/openapi.json && cd ../frontend && openapi-typescript node_modules/.tmp/openapi.json -o src/api/schema.ts"
   },
   "dependencies": {
     "@tanstack/react-query": "^5.104.5",

@@ -1,3 +1,15 @@
+# The api and worker run the same backend image with the same settings and data.
+x-backend: &backend
+  build: ./backend
+  image: match-made-backend
+  environment:
+    MATCHMADE_REDIS_URL: redis://redis:6379/0
+  volumes:
+    - data:/data
+  depends_on:
+    redis:
+      condition: service_healthy
+
 services:
   redis:
     image: redis:7-alpine
@@ -8,14 +20,7 @@ services:
       retries: 10
 
   api:
-    build: ./backend
-    environment:
-      MATCHMADE_REDIS_URL: redis://redis:6379/0
-    volumes:
-      - data:/data
-    depends_on:
-      redis:
-        condition: service_healthy
+    <<: *backend
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')"]
       interval: 5s
@@ -23,15 +28,8 @@ services:
       retries: 20
 
   worker:
-    build: ./backend
+    <<: *backend
     command: ["matchmade-worker"]
-    environment:
-      MATCHMADE_REDIS_URL: redis://redis:6379/0
-    volumes:
-      - data:/data
-    depends_on:
-      redis:
-        condition: service_healthy
 
   web:
     build: ./frontend

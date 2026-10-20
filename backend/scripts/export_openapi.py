@@ -1,6 +1,6 @@
-"""Write the API's OpenAPI schema; the frontend generates its types from it.
+"""Write the API's OpenAPI schema; `npm run gen:api` in frontend/ generates types from it.
 
-uv run python scripts/export_openapi.py ../frontend/src/api/openapi.json
+uv run python scripts/export_openapi.py <path>
 """
 
 from __future__ import annotations
@@ -14,7 +14,9 @@ from matchmade.api import create_app
 
 def main() -> None:
     schema = create_app().openapi()
-    Path(sys.argv[1]).write_text(json.dumps(schema, indent=2) + "\n")
+    path = Path(sys.argv[1])
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(schema, indent=2) + "\n")
 
 
 if __name__ == "__main__":
