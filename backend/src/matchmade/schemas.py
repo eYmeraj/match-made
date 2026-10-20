@@ -5,6 +5,7 @@ from __future__ import annotations
 from enum import StrEnum
 from typing import Annotated, Literal
 
+import polars as pl
 from pydantic import BaseModel, Field, model_validator
 
 
@@ -29,6 +30,18 @@ class Replacement(BaseModel):
     find: str = Field(min_length=1)
     replace: str = ""
     regex: bool = False
+
+    @model_validator(mode="after")
+    def _check_regex(self) -> Replacement:
+        # Compile with Polars' own engine: it lacks some Python features (e.g. lookbehind).
+        if self.regex:
+            try:
+                pl.select(pl.lit("").str.contains(self.find))
+            except pl.exceptions.PolarsError as e:
+                lines = str(e).splitlines()
+                reason = next((x[7:] for x in lines if x.startswith("error: ")), "invalid syntax")
+                raise ValueError(f"Invalid regular expression {self.find!r}: {reason}") from e
+        return self
 
 
 # --- Cleaning options, one model per column type -------------------------------------

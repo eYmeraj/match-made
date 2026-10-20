@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-import hashlib
+import os
+import tempfile
 from collections import OrderedDict
 from enum import StrEnum
 from pathlib import Path
@@ -201,10 +202,14 @@ def match_page(
 # --- Exports --------------------------------------------------------------------------
 
 
+# Columns the merged file adds. Inputs can have them too, e.g. an earlier merged export.
+_ADDED_COLUMNS = {"match_score", "row (A)", "row (B)"}
+
+
 def _output_names(a_cols: list[str], b_cols: list[str]) -> tuple[dict[str, str], dict[str, str]]:
-    shared = set(a_cols) & set(b_cols)
-    a_map = {c: f"{c} (A)" if c in shared else c for c in a_cols}
-    b_map = {c: f"{c} (B)" if c in shared else c for c in b_cols}
+    clash = (set(a_cols) & set(b_cols)) | _ADDED_COLUMNS
+    a_map = {c: f"{c} (A)" if c in clash else c for c in a_cols}
+    b_map = {c: f"{c} (B)" if c in clash else c for c in b_cols}
     return a_map, b_map
 
 
@@ -246,7 +251,7 @@ def build_export(
     a_cols = [c for c in a.columns if c != "__a"]
     b_cols = [c for c in b.columns if c != "__b"]
     a_map, b_map = _output_names(a_cols, b_cols)
-    scores = _score_columns(config, set(a_map.values()) | set(b_map.values()))
+    scores = _score_columns(config, {*a_map.values(), *b_map.values(), *_ADDED_COLUMNS})
     pairs = found.select(
         pl.col("a").alias("__a"),
         pl.col("b").alias("__b"),
@@ -280,23 +285,26 @@ def export_file(
     cardinality: Cardinality,
     join: JoinMode,
 ) -> Path:
-    key = f"{kind}-{threshold}-{cardinality}-{join}-{fmt}"
-    digest = hashlib.sha1(key.encode()).hexdigest()[:12]
-    directory = storage.job_dir(job_id) / "exports"
-    directory.mkdir(exist_ok=True)
-    path = directory / f"{kind}-{digest}.{fmt}"
-    if path.exists():
-        return path
+    """Write an export to a new file in the job directory; the caller deletes it.
 
+    Exports are large and rebuild in about a second at a million rows, so none are kept.
+    """
     frame = build_export(storage, job_id, kind, threshold, cardinality, join)
-    tmp = path.with_suffix(f".tmp.{fmt}")
-    if fmt == "xlsx":
-        if frame.height > XLSX_MAX_ROWS:
-            raise ExportTooLargeError(
-                f"{frame.height:,} rows exceed Excel's limit of {XLSX_MAX_ROWS:,}. Use CSV."
-            )
-        frame.write_excel(tmp, worksheet=kind.value, autofit=frame.height <= 10_000)
-    else:
-        frame.write_csv(tmp)
-    tmp.replace(path)
+    if fmt == "xlsx" and frame.height > XLSX_MAX_ROWS:
+        raise ExportTooLargeError(
+            f"{frame.height:,} rows exceed Excel's limit of {XLSX_MAX_ROWS:,}. Use CSV."
+        )
+    fd, name = tempfile.mkstemp(
+        prefix=f"export-{kind.value}-", suffix=f".{fmt}", dir=storage.job_dir(job_id)
+    )
+    os.close(fd)
+    path = Path(name)
+    try:
+        if fmt == "xlsx":
+            frame.write_excel(path, worksheet=kind.value, autofit=frame.height <= 10_000)
+        else:
+            frame.write_csv(path)
+    except BaseException:
+        path.unlink(missing_ok=True)
+        raise
     return path

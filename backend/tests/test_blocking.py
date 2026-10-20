@@ -196,3 +196,19 @@ def test_tfidf_results_do_not_depend_on_chunking(monkeypatch):
     assert progress == sorted(progress)
     assert len(progress) > 5
     assert progress[-1] == 1.0
+
+
+def test_tfidf_skips_value_pairs_that_multiply_into_too_many_rows():
+    # Placeholders like "N/A" repeat on both sides; 3,000 x 3,000 rows would be 9M pairs.
+    names = [f"company {i}" for i in range(500)] + ["unknown"] * 3000
+    a, b = frame(name=names), frame(name=names)
+    blocks = Blocking(
+        rules=[TfidfBlockingRule(comparison_id="name", top_k=1)], max_block_pairs=1_000_000
+    )
+    result = candidate_pairs(a, b, blocks, max_candidates=10**6)
+    assert result.pairs.height == 500
+    (stats,) = result.rules
+    assert (stats.skipped_blocks, stats.skipped_pairs) == (1, 9_000_000)
+    # The estimate warns about the same placeholder before anything runs.
+    (estimated,) = estimate(a, b, blocks)
+    assert (estimated.skipped_blocks, estimated.skipped_pairs) == (1, 9_000_000)

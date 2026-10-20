@@ -9,8 +9,9 @@ from typing import Annotated, Literal
 import polars as pl
 from fastapi import APIRouter, Depends, FastAPI, Query, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 from redis import Redis
+from starlette.background import BackgroundTask
 
 from matchmade import blocking, jobs, results
 from matchmade.cleaning import DEFAULT_CLEANING, clean
@@ -186,7 +187,8 @@ class RuleEstimate(BaseModel):
     pairs: int
     skipped_blocks: int
     skipped_pairs: int
-    upper_bound: bool
+    # TF-IDF counts are estimated from average duplication; key rule counts are exact.
+    approximate: bool
 
 
 class Estimate(BaseModel):
@@ -227,7 +229,7 @@ def estimate(config: MatchConfig, storage: StorageDep, settings: SettingsDep) ->
                 pairs=s.pairs,
                 skipped_blocks=s.skipped_blocks,
                 skipped_pairs=s.skipped_pairs,
-                upper_bound=config.blocking.rules[s.rule_index].kind == "tfidf",
+                approximate=config.blocking.rules[s.rule_index].kind == "tfidf",
             )
             for s in stats
         ],
@@ -308,7 +310,12 @@ def job_export(
         if format == "csv"
         else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
-    return FileResponse(path, media_type=media, filename=f"{kind.value}.{format}")
+    return FileResponse(
+        path,
+        media_type=media,
+        filename=f"{kind.value}.{format}",
+        background=BackgroundTask(path.unlink, missing_ok=True),
+    )
 
 
 @router.get("/health")
@@ -337,6 +344,10 @@ def create_app(storage: Storage | None = None, connection: Redis | None = None) 
     @app.exception_handler(ReadError)
     @app.exception_handler(ValueError)
     async def _invalid(_: Request, exc: Exception) -> JSONResponse:
-        return JSONResponse(status_code=422, content={"detail": str(exc)})
+        if isinstance(exc, ValidationError):  # options validated inside an endpoint
+            detail = "; ".join(e["msg"].removeprefix("Value error, ") for e in exc.errors())
+        else:
+            detail = str(exc)
+        return JSONResponse(status_code=422, content={"detail": detail})
 
     return app

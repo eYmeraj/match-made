@@ -144,3 +144,23 @@ def test_categorical():
 def test_mismatched_options_are_rejected():
     with pytest.raises(ValueError, match="do not match"):
         clean(pl.col("v"), ColumnType.NUMBER, TextCleaning())
+
+
+@pytest.mark.parametrize(
+    ("raw", "day_first", "expected"),
+    [
+        ("15/03/45", True, dt.date(2045, 3, 15)),
+        ("15/03/1945", True, dt.date(1945, 3, 15)),
+        ("03/15/70", False, dt.date(1970, 3, 15)),
+        ("15 Mar 45", False, dt.date(2045, 3, 15)),
+    ],
+)
+def test_two_digit_years_are_not_read_as_the_first_century(raw, day_first, expected):
+    assert run([raw], ColumnType.DATE, DateCleaning(day_first=day_first)) == [expected]
+
+
+@pytest.mark.parametrize("pattern", ["(", "(?<=a)b"])
+def test_invalid_or_unsupported_regex_is_rejected(pattern):
+    with pytest.raises(ValueError, match="regular expression"):
+        Replacement(find=pattern, regex=True)
+    assert Replacement(find=pattern, regex=False).find == pattern

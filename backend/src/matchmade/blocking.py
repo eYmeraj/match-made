@@ -214,15 +214,42 @@ def _nearest_values(
     return np.concatenate(found_a), np.concatenate(found_b)
 
 
-def _tfidf_pairs(
-    a: pl.DataFrame, b: pl.DataFrame, rule: TfidfBlockingRule, on_progress: ProgressFn
+def _value_rows(frame: pl.DataFrame, comparison_id: str) -> pl.DataFrame:
+    col = value_column(comparison_id)
+    return frame.select(ROW, pl.col(col).cast(pl.String).alias("v")).drop_nulls()
+
+
+def _value_pair_sizes(
+    value_pairs: pl.DataFrame, a_rows: pl.DataFrame, b_rows: pl.DataFrame, max_block_pairs: int
 ) -> pl.DataFrame:
-    col = value_column(rule.comparison_id)
-    a_rows = a.select(ROW, pl.col(col).cast(pl.String).alias("v")).drop_nulls()
-    b_rows = b.select(ROW, pl.col(col).cast(pl.String).alias("v")).drop_nulls()
+    """Row pairs behind each (A value, B value) pair, flagged like oversized key blocks.
+
+    A value repeated on both sides, such as a placeholder like "n a", would otherwise
+    multiply into more row pairs than fit in memory.
+    """
+    return (
+        value_pairs.join(a_rows.group_by("v").len("n_a").rename({"v": "va"}), on="va")
+        .join(b_rows.group_by("v").len("n_b").rename({"v": "vb"}), on="vb")
+        .with_columns(pairs=pl.col("n_a").cast(pl.Int64) * pl.col("n_b"))
+        .with_columns(oversized=pl.col("pairs") > max_block_pairs)
+    )
+
+
+def _tfidf_pairs(
+    a: pl.DataFrame,
+    b: pl.DataFrame,
+    rule: TfidfBlockingRule,
+    max_block_pairs: int,
+    on_progress: ProgressFn,
+) -> tuple[pl.DataFrame, pl.DataFrame]:
+    """Candidate row pairs, and the value pair sizes they came from."""
+    a_rows, b_rows = _value_rows(a, rule.comparison_id), _value_rows(b, rule.comparison_id)
     a_values = a_rows.get_column("v").unique(maintain_order=True)
     b_values = b_rows.get_column("v").unique(maintain_order=True)
-    empty = pl.DataFrame(schema={"a": pl.UInt32, "b": pl.UInt32})
+    empty = (
+        pl.DataFrame(schema={"a": pl.UInt32, "b": pl.UInt32}),
+        pl.DataFrame(schema={"pairs": pl.Int64, "oversized": pl.Boolean}),
+    )
     if a_values.is_empty() or b_values.is_empty():
         on_progress(1.0)
         return empty
@@ -241,35 +268,52 @@ def _tfidf_pairs(
         return empty
 
     value_pairs = pl.DataFrame({"va": a_values.gather(rows), "vb": b_values.gather(cols)})
-    return (
-        value_pairs.join(a_rows.rename({ROW: "a", "v": "va"}), on="va")
+    sizes = _value_pair_sizes(value_pairs, a_rows, b_rows, max_block_pairs)
+    pairs = (
+        sizes.filter(~pl.col("oversized"))
+        .select("va", "vb")
+        .join(a_rows.rename({ROW: "a", "v": "va"}), on="va")
         .join(b_rows.rename({ROW: "b", "v": "vb"}), on="vb")
         .select("a", "b")
     )
+    return pairs, sizes
 
 
-def _tfidf_upper_bound(a: pl.DataFrame, b: pl.DataFrame, rule: TfidfBlockingRule) -> int:
-    col = value_column(rule.comparison_id)
-    b_vals = b.get_column(col).drop_nulls()
-    if b_vals.is_empty():
-        return 0
-    rows_per_value = len(b_vals) / max(b_vals.n_unique(), 1)
-    n_a = a.get_column(col).drop_nulls().len()
-    return int(n_a * min(rule.top_k * rows_per_value, len(b_vals)))
+def _tfidf_estimate(
+    a: pl.DataFrame, b: pl.DataFrame, rule: TfidfBlockingRule, index: int, max_block_pairs: int
+) -> RuleStats:
+    """Rough pair count from average duplication; values equal on both sides are always
+    each other's neighbours, so the ones that would be skipped are known exactly."""
+    a_rows, b_rows = _value_rows(a, rule.comparison_id), _value_rows(b, rule.comparison_id)
+    if b_rows.is_empty():
+        return RuleStats(rule_index=index, pairs=0)
+    rows_per_value = b_rows.height / max(b_rows.get_column("v").n_unique(), 1)
+    pairs = int(a_rows.height * min(rule.top_k * rows_per_value, b_rows.height))
+    shared = a_rows.select(pl.col("v").unique()).join(b_rows.select(pl.col("v").unique()), on="v")
+    identical = shared.select(pl.col("v").alias("va"), pl.col("v").alias("vb"))
+    skipped = _rule_stats_from_sizes(
+        index, _value_pair_sizes(identical, a_rows, b_rows, max_block_pairs)
+    )
+    return RuleStats(
+        rule_index=index,
+        pairs=pairs,
+        skipped_blocks=skipped.skipped_blocks,
+        skipped_pairs=skipped.skipped_pairs,
+    )
 
 
 # --- Public API ---------------------------------------------------------------------
 
 
 def estimate(a: pl.DataFrame, b: pl.DataFrame, blocking: Blocking) -> list[RuleStats]:
-    """Cheap per-rule pair counts (exact for key rules, an upper bound for TF-IDF)."""
+    """Cheap per-rule pair counts (exact for key rules, approximate for TF-IDF)."""
     stats = []
     for i, rule in enumerate(blocking.rules):
         if isinstance(rule, ExactBlockingRule):
             blocks = _key_blocks(a, b, rule, blocking.max_block_pairs)
             stats.append(_rule_stats_from_sizes(i, blocks.sizes))
         else:
-            stats.append(RuleStats(rule_index=i, pairs=_tfidf_upper_bound(a, b, rule)))
+            stats.append(_tfidf_estimate(a, b, rule, i, blocking.max_block_pairs))
     return stats
 
 
@@ -284,8 +328,8 @@ def _rule_pairs(
     if isinstance(rule, ExactBlockingRule):
         blocks = _key_blocks(a, b, rule, max_block_pairs)
         return _key_pairs(blocks, len(rule.parts)), _rule_stats_from_sizes(index, blocks.sizes)
-    pairs = _tfidf_pairs(a, b, rule, on_progress)
-    return pairs, RuleStats(rule_index=index, pairs=pairs.height)
+    pairs, sizes = _tfidf_pairs(a, b, rule, max_block_pairs, on_progress)
+    return pairs, _rule_stats_from_sizes(index, sizes)
 
 
 def candidate_pairs(
