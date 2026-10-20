@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 
+import numpy as np
 import polars as pl
 from rapidfuzz import fuzz
 from rapidfuzz.process import cdist
@@ -40,6 +41,7 @@ _EXACT_AGREEMENT = 0.9
 _NUMBER_TOLERANCE = 0.05
 _DATE_TOLERANCE_DAYS = 365
 _FUZZY_PROBES = 100
+_FUZZY_FIRST_PROBES = 10
 _FUZZY_MATCH = 85
 _OVERLAP_TEXT_CLEANING = TextCleaning(remove_legal_suffixes=True)
 # Below this many row pairs, comparing everything is cheaper than blocking.
@@ -114,11 +116,21 @@ def _value_overlap(ua: pl.Series, ub: pl.Series, column_type: ColumnType) -> flo
     if column_type != ColumnType.TEXT or exact >= _MIN_PAIR_SCORE:
         return exact
     # Typos and formatting hide exact matches; probe a sample of A against all of B.
+    # Most column pairs are unrelated, so stop early when a first few probes find nothing.
     probe = ua.sample(min(len(ua), _FUZZY_PROBES), seed=0).to_list()
-    best = cdist(
-        probe, ub.to_list(), scorer=fuzz.token_sort_ratio, score_cutoff=_FUZZY_MATCH, workers=-1
-    ).max(axis=1)
-    return max(exact, float((best >= _FUZZY_MATCH).mean()))
+    targets = ub.to_list()
+
+    def found(values: list[str]) -> np.ndarray:
+        scores = cdist(
+            values, targets, scorer=fuzz.token_sort_ratio, score_cutoff=_FUZZY_MATCH, workers=-1
+        )
+        return scores.max(axis=1) >= _FUZZY_MATCH
+
+    first = found(probe[:_FUZZY_FIRST_PROBES])
+    if not first.any():
+        return exact
+    rest = found(probe[_FUZZY_FIRST_PROBES:]) if len(probe) > _FUZZY_FIRST_PROBES else first[:0]
+    return max(exact, float(np.concatenate([first, rest]).mean()))
 
 
 def _looks_day_first(values: pl.Series) -> bool:

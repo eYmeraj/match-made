@@ -130,6 +130,7 @@ def main() -> None:
     print(
         f"export merged csv: {time.perf_counter() - t3:.1f}s ({path.stat().st_size / 1e6:.0f} MB)"
     )
+    path.unlink()
     shutil.rmtree(root)
 
 

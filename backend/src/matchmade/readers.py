@@ -31,6 +31,8 @@ class ParseInfo(BaseModel):
     sheets: list[str] = []
     delimiter: str | None = None
     encoding: str | None = None
+    # Things the user should check about how the file was read.
+    warnings: list[str] = []
 
 
 class ReadError(ValueError):
@@ -46,14 +48,72 @@ def detect_format(filename: str) -> FileFormat:
     raise ReadError(f"Unsupported file type '{suffix}'. Use CSV, TSV or XLSX.")
 
 
-def detect_encoding(sample: bytes) -> str:
+# Encodings real CSV files arrive in when they are not UTF-8. Old Mac code pages are left
+# out: on short samples charset-normalizer otherwise picks them for Central European text.
+_LEGACY_ENCODINGS = [
+    "cp1252", "cp1250", "cp1251", "cp1253", "cp1254", "cp1255", "cp1256", "cp1257", "cp1258",
+    "shift_jis", "euc_jp", "gb18030", "big5", "euc_kr",
+]  # fmt: skip
+# UTF-32 first: its little-endian mark starts with UTF-16's.
+_BOMS = [
+    (codecs.BOM_UTF32_LE, "utf-32"),
+    (codecs.BOM_UTF32_BE, "utf-32"),
+    (codecs.BOM_UTF16_LE, "utf-16"),
+    (codecs.BOM_UTF16_BE, "utf-16"),
+]
+
+
+def detect_encoding(path: Path) -> tuple[str, bool]:
+    """The file's encoding, and whether it is only a guess.
+
+    The whole file is checked: Windows exports often have their first accented name
+    megabytes into otherwise plain ASCII text.
+    """
+    with open(path, "rb") as f:
+        head = f.read(4)
+    for bom, encoding in _BOMS:
+        if head.startswith(bom):
+            return encoding, False
+    decoder = codecs.getincrementaldecoder("utf-8")()
     try:
-        # A multi-byte character may be cut at the end of the sample.
-        codecs.getincrementaldecoder("utf-8")().decode(sample, final=False)
-        return "utf-8"
+        with open(path, "rb") as f:
+            while chunk := f.read(_SNIFF_BYTES):
+                decoder.decode(chunk)
+        decoder.decode(b"", final=True)
+        return "utf-8", False
     except UnicodeDecodeError:
-        match = from_bytes(sample).best()
-        return match.encoding if match else "latin-1"
+        return _guess_legacy_encoding(path), True
+
+
+def _guess_legacy_encoding(path: Path) -> str:
+    # Only lines with non-ASCII bytes tell encodings apart; the rest dilutes the evidence.
+    evidence = bytearray()
+    with open(path, "rb") as f:
+        for line in f:
+            if not line.isascii():
+                evidence += line
+                if len(evidence) >= _SNIFF_BYTES:
+                    break
+    matches = list(from_bytes(bytes(evidence), cp_isolation=_LEGACY_ENCODINGS))
+    if not matches:
+        return "cp1252"
+    best = matches[0]
+    # Short samples often tie; then the Western Windows code page is the likeliest.
+    for match in matches:
+        tied = (match.chaos, match.coherence) == (best.chaos, best.coherence)
+        if tied and "cp1252" in match.could_be_from_charset:
+            return "cp1252"
+    return best.encoding
+
+
+def _non_ascii_examples(frame: pl.DataFrame, limit: int = 3) -> list[str]:
+    examples: list[str] = []
+    for column in frame.columns:
+        values = frame.get_column(column).drop_nulls()
+        examples += values.filter(values.str.contains(r"[^\x00-\x7F]")).head(limit).to_list()
+        if len(examples) >= limit:
+            break
+    return examples[:limit]
 
 
 def detect_delimiter(text_sample: str, filename: str) -> str:
@@ -92,7 +152,7 @@ def _dedupe_headers(names: list[str]) -> list[str]:
 def read_csv(path: Path, filename: str, options: ParseOptions) -> tuple[pl.DataFrame, ParseInfo]:
     with open(path, "rb") as f:
         sample = f.read(_SNIFF_BYTES)
-    encoding = options.encoding or detect_encoding(sample)
+    encoding, guessed = (options.encoding, False) if options.encoding else detect_encoding(path)
     try:
         text_sample = sample.decode(encoding, errors="ignore")
     except LookupError as e:
@@ -103,8 +163,10 @@ def read_csv(path: Path, filename: str, options: ParseOptions) -> tuple[pl.DataF
         raise ReadError("The delimiter must be a single character")
 
     source = _to_utf8(path, encoding)
-    try:
-        frame = pl.read_csv(
+    warnings: list[str] = []
+
+    def read(truncate_ragged_lines: bool) -> pl.DataFrame:
+        return pl.read_csv(
             source,
             separator=delimiter,
             # Headers are read as the first data row so that duplicate or blank names
@@ -112,8 +174,22 @@ def read_csv(path: Path, filename: str, options: ParseOptions) -> tuple[pl.DataF
             has_header=False,
             infer_schema=False,
             encoding="utf8-lossy",
-            truncate_ragged_lines=True,
+            truncate_ragged_lines=truncate_ragged_lines,
         )
+
+    try:
+        try:
+            frame = read(truncate_ragged_lines=False)
+        except pl.exceptions.ComputeError as e:
+            if "more fields" not in str(e):
+                raise
+            # Usually an unquoted delimiter inside a value; keep the file usable, but say so.
+            frame = read(truncate_ragged_lines=True)
+            warnings.append(
+                "Some rows have more fields than the header, often because a value contains "
+                "an unquoted delimiter. Their extra fields were dropped and their values may "
+                "be in the wrong columns."
+            )
     except pl.exceptions.PolarsError as e:
         raise ReadError(f"Could not parse the file as delimited text: {e}") from e
     finally:
@@ -125,7 +201,15 @@ def read_csv(path: Path, filename: str, options: ParseOptions) -> tuple[pl.DataF
     header = [(v or "").lstrip("\ufeff") for v in frame.row(0)]
     frame = frame.slice(1)
     frame.columns = _dedupe_headers(header)
-    return frame, ParseInfo(format="csv", delimiter=delimiter, encoding=encoding)
+    if guessed:
+        examples = ", ".join(f"“{v}”" for v in _non_ascii_examples(frame))
+        warnings.insert(
+            0,
+            f"This file is not UTF-8, so its encoding was guessed as {encoding}. "
+            f"Check that accented letters look right{f' ({examples})' if examples else ''}; "
+            "if not, choose the encoding below.",
+        )
+    return frame, ParseInfo(format="csv", delimiter=delimiter, encoding=encoding, warnings=warnings)
 
 
 def read_xlsx(path: Path, options: ParseOptions) -> tuple[pl.DataFrame, ParseInfo]:

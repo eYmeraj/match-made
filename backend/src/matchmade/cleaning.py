@@ -163,7 +163,10 @@ def date_formats(opts: DateCleaning) -> list[str]:
         if opts.day_first
         else _DATE_FORMATS_MONTH_FIRST + _DATE_FORMATS_DAY_FIRST
     )
-    return _DATE_FORMATS_ISO + ambiguous + _DATE_FORMATS_NAMED
+    formats = _DATE_FORMATS_ISO + ambiguous + _DATE_FORMATS_NAMED
+    # "%Y" happily reads "45" as the year 45 AD, so two-digit-year formats go first; they
+    # do not match four-digit years, which then fall through to "%Y".
+    return sorted(formats, key=lambda f: "%y" not in f)
 
 
 def clean_date(expr: pl.Expr, opts: DateCleaning) -> pl.Expr:

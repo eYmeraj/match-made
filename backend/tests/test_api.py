@@ -197,7 +197,7 @@ def test_estimate(client, datasets):
     a, b = datasets
     body = client.post("/api/estimate", json=make_config(a, b)).json()
     assert body["all_pairs"] == 49
-    assert body["rules"][0]["upper_bound"] is True
+    assert body["rules"][0]["approximate"] is True
 
 
 def test_invalid_config_is_rejected(client, datasets):
@@ -387,7 +387,7 @@ def test_suggest_measures_overlap_on_whole_columns(client, monkeypatch):
     assert pairs["Company Name"] == "vendor"
 
 
-def test_suggested_key_blocking_avoids_approximate_comparisons(storage):
+def test_suggested_key_blocking_avoids_approximate_comparisons():
     comparisons = [
         NumberComparison(id="n", column_a="x", column_b="y", tolerance=0.05),
         DateComparison(id="d", column_a="p", column_b="q", tolerance_days=31),
@@ -395,3 +395,45 @@ def test_suggested_key_blocking_avoids_approximate_comparisons(storage):
     rule = suggest_key_rule(comparisons, distinct={"x": 10_000, "p": 5_000})
     assert rule is not None
     assert [(p.comparison_id, p.transform) for p in rule.parts] == [("d", KeyTransform.YEAR)]
+
+
+def test_merged_export_of_an_earlier_merged_export(client, run_worker):
+    # Re-matching a merged file: its columns clash with the ones the export adds.
+    a = upload(client, "merged.csv", "match_score,row (A),row (B),name\n97.5,1,4,Acme Ltd\n")
+    b = upload(client, "c.csv", "name,row (A)\nAcme Limited,x\n")
+    config = {
+        "dataset_a": a["id"],
+        "dataset_b": b["id"],
+        "comparisons": [{"id": "n", "type": "text", "column_a": "name", "column_b": "name"}],
+        "threshold": 50,
+    }
+    job_id, _ = run_job(client, run_worker, config)
+    params = {"threshold": 50, "cardinality": "one_to_one", "kind": "merged"}
+    merged = client.get(f"/api/jobs/{job_id}/export", params=params)
+    assert merged.status_code == 200, merged.text
+    (row,) = csv.DictReader(io.StringIO(merged.text))
+    assert row["match_score (A)"] == "97.5"
+    assert row["row (A) (A)"] == "1"
+    assert row["row (A) (B)"] == "x"
+    assert row["row (A)"] == "1"
+
+
+def test_exports_are_not_kept_on_disk(client, run_worker, datasets, storage):
+    a, b = datasets
+    job_id, _ = run_job(client, run_worker, make_config(a, b))
+    for threshold in (80, 90):
+        params = {"threshold": threshold, "cardinality": "one_to_one", "kind": "merged"}
+        assert client.get(f"/api/jobs/{job_id}/export", params=params).status_code == 200
+    leftovers = [
+        p.name for p in storage.job_dir(job_id).rglob("*") if p.suffix in {".csv", ".xlsx"}
+    ]
+    assert leftovers == []
+
+
+def test_invalid_regex_gets_a_clear_error(client, datasets):
+    a, _ = datasets
+    cleaning = {"replacements": [{"find": "(", "replace": "", "regex": True}]}
+    body = {"dataset_id": a["id"], "column": "Company Name", "type": "text", "cleaning": cleaning}
+    preview = client.post("/api/preview/cleaning", json=body)
+    assert preview.status_code == 422
+    assert preview.json()["detail"] == "Invalid regular expression '(': unclosed group"
