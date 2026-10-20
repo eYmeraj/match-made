@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 import polars as pl
 from pydantic import BaseModel
 
@@ -26,6 +28,18 @@ def _parse_rate(values: pl.Series, expr: pl.Expr) -> float:
     return 1 - parsed.null_count() / len(values)
 
 
+# Letters a number may carry: an exponent ("1.5e3") or a currency code ("1,200 EUR").
+_NUMERIC_LETTERS = re.compile(
+    r"^\s*[-+]?(\d+\.?\d*|\.\d+)[eE][-+]?\d+\s*$|^\s*[A-Z]{3}\s+[^A-Za-z]+$|^[^A-Za-z]+\s+[A-Z]{3}\s*$"
+)
+
+
+def _has_non_numeric_letters(values: pl.Series) -> bool:
+    """True when a value has letters, so ids like "A0000001" stay text."""
+    lettered = values.filter(values.str.contains(r"[A-Za-z]"))
+    return not lettered.str.contains(_NUMERIC_LETTERS.pattern).all()
+
+
 def infer_type(values: pl.Series) -> ColumnType:
     """Infer a column type from its non-null raw string values."""
     v = pl.col("v")
@@ -38,9 +52,9 @@ def infer_type(values: pl.Series) -> ColumnType:
     looks_dated = values.str.contains(r"[-/.\s]|[A-Za-z]").sum() / len(values)
     if looks_dated > 0.5 and _parse_rate(values, clean_date(v, DateCleaning())) >= 0.9:
         return ColumnType.DATE
-    if _parse_rate(values, clean_number(v, NumberCleaning())) >= 0.95 and not (
-        values.str.contains(r"[A-Za-z]{2,}").any()
-    ):
+    if _parse_rate(
+        values, clean_number(v, NumberCleaning())
+    ) >= 0.95 and not _has_non_numeric_letters(values):
         return ColumnType.NUMBER
     if distinct <= 50 and distinct / len(values) < 0.05:
         return ColumnType.CATEGORICAL
