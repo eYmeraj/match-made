@@ -22,12 +22,12 @@ from matchmade.schemas import (
     Cleaning,
     ColumnType,
     Comparison,
+    KeyTransform,
     MatchConfig,
-    TextMetric,
     allowed_transforms,
 )
 from matchmade.settings import Settings, get_settings
-from matchmade.storage import DatasetMeta, NotFoundError, Storage
+from matchmade.storage import DatasetMeta, InUseError, NotFoundError, Storage
 from matchmade.suggest import suggest_blocking, suggest_comparisons
 
 _UPLOAD_CHUNK = 1 << 20
@@ -53,21 +53,15 @@ router = APIRouter(prefix="/api")
 
 
 class Meta(BaseModel):
-    transforms: dict[ColumnType, list[str]]
-    metrics: list[TextMetric]
+    transforms: dict[ColumnType, list[KeyTransform]]
     default_cleaning: dict[ColumnType, dict]
-    keep_margin: float
-    max_candidates: int
 
 
 @router.get("/meta")
-def meta(settings: SettingsDep) -> Meta:
+def meta() -> Meta:
     return Meta(
         transforms={t: sorted(allowed_transforms(t)) for t in ColumnType},
-        metrics=list(TextMetric),
         default_cleaning={t: cls().model_dump() for t, cls in DEFAULT_CLEANING.items()},
-        keep_margin=settings.keep_margin,
-        max_candidates=settings.max_candidates,
     )
 
 
@@ -90,8 +84,7 @@ def upload_dataset(file: UploadFile, storage: StorageDep) -> DatasetMeta:
 
 @router.post("/datasets/{dataset_id}/parse")
 def reparse_dataset(dataset_id: str, options: ParseOptions, storage: StorageDep) -> DatasetMeta:
-    current = storage.dataset_meta(dataset_id)
-    return storage.parse_dataset(dataset_id, current.filename, options)
+    return storage.reparse_dataset(dataset_id, options)
 
 
 @router.get("/datasets/{dataset_id}")
@@ -336,6 +329,10 @@ def create_app(storage: Storage | None = None, connection: Redis | None = None) 
     @app.exception_handler(NotFoundError)
     async def _not_found(_: Request, exc: NotFoundError) -> JSONResponse:
         return JSONResponse(status_code=404, content={"detail": "Not found"})
+
+    @app.exception_handler(InUseError)
+    async def _in_use(_: Request, exc: InUseError) -> JSONResponse:
+        return JSONResponse(status_code=409, content={"detail": str(exc)})
 
     @app.exception_handler(ReadError)
     @app.exception_handler(ValueError)

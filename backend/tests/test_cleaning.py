@@ -39,7 +39,15 @@ def test_text_company_preset_removes_suffixes_and_expands_abbreviations():
         ["ACME & Co.", "A.B.C. Int'l Ltd", "Smith Bros., L.L.C.", "Corp of Cos"],
         ColumnType.TEXT,
         opts,
-    ) == ["acme and", "abc international", "smith brothers", "of cos"]
+    ) == ["acme and", "abc international", "smith brothers", "corp of cos"]
+
+
+def test_text_suffix_removal_only_strips_the_end_of_a_name():
+    # A suffix-like word elsewhere is part of the name ("AG Barr" is not "Barr").
+    opts = TextCleaning(remove_legal_suffixes=True)
+    assert run(
+        ["AG Barr plc", "Co-op Group Ltd", "Volvo AB", "Holdings Ltd"], ColumnType.TEXT, opts
+    ) == ["ag barr", "co op", "volvo", "holdings"]
 
 
 def test_text_suffix_removal_keeps_words_containing_suffixes():

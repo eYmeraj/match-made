@@ -74,6 +74,15 @@ def _words_pattern(words: list[str]) -> str:
     return r"(?i)\b(?:" + "|".join(re.escape(w) for w in ordered) + r")\b"
 
 
+# Only a run of suffixes at the end of a name, and never the first word: "AG Barr plc" is
+# "ag barr" and "Holdings Ltd" stays "holdings".
+_TRAILING_SUFFIXES = (
+    r"(?i)^(.+?)(?:\s+(?:"
+    + "|".join(re.escape(w) for w in sorted(LEGAL_SUFFIXES, key=len, reverse=True))
+    + r"))+$"
+)
+
+
 def _collapse_whitespace(expr: pl.Expr) -> pl.Expr:
     return expr.str.replace_all(r"\s+", " ").str.strip_chars()
 
@@ -104,7 +113,7 @@ def clean_text(expr: pl.Expr, opts: TextCleaning) -> pl.Expr:
         for short, full in ABBREVIATIONS.items():
             e = e.str.replace_all(rf"(?i)\b{re.escape(short)}\b", full)
     if opts.remove_legal_suffixes:
-        e = e.str.replace_all(_words_pattern(LEGAL_SUFFIXES), " ")
+        e = _collapse_whitespace(e).str.replace(_TRAILING_SUFFIXES, "$1")
     if opts.remove_stopwords:
         e = e.str.replace_all(_words_pattern(STOPWORDS), " ")
     if opts.remove_digits:

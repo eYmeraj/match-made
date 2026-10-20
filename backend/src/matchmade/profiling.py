@@ -16,9 +16,7 @@ PROFILE_SAMPLE_ROWS = 20_000
 class ColumnProfile(BaseModel):
     name: str
     inferred_type: ColumnType
-    null_fraction: float
     distinct: int
-    samples: list[str]
 
 
 def _parse_rate(values: pl.Series, expr: pl.Expr) -> float:
@@ -65,16 +63,12 @@ def profile_frame(frame: pl.DataFrame) -> list[ColumnProfile]:
     sample = frame.head(PROFILE_SAMPLE_ROWS)
     profiles = []
     for name in frame.columns:
-        column = sample.get_column(name)
-        values = column.drop_nulls()
-        samples = values.unique(maintain_order=True).head(8).to_list()
+        values = sample.get_column(name).drop_nulls()
         profiles.append(
             ColumnProfile(
                 name=name,
                 inferred_type=infer_type(values),
-                null_fraction=round(column.null_count() / max(len(column), 1), 4),
                 distinct=values.n_unique(),
-                samples=samples,
             )
         )
     return profiles

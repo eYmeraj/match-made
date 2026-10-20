@@ -18,8 +18,8 @@ download the merged result. Built for files of a million rows or more.
 docker compose up -d --build
 ```
 
-Open http://localhost:8080 (set `MATCHMADE_PORT` to change the port). Uploaded files and
-results live in the `data` volume.
+Open http://localhost:8080 (set `MATCHMADE_PORT` to change the port). There is no login, so
+the app only listens on this machine. Uploaded files and results live in the `data` volume.
 
 ## Develop
 

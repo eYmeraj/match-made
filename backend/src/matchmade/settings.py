@@ -9,8 +9,9 @@ class Settings(BaseSettings):
 
     data_dir: Path = Path("data")
     redis_url: str = "redis://localhost:6379/0"
-    # Hard cap on scored candidate pairs per run; bounds memory and runtime.
-    max_candidates: int = 100_000_000
+    # Hard cap on scored candidate pairs per run; bounds memory and runtime. 10M pairs peak
+    # at ~2.3 GB in the worker and 26M did not fit Docker Desktop's default 3.8 GB VM.
+    max_candidates: int = 15_000_000
     score_chunk_size: int = 2_000_000
     job_timeout_seconds: int = 6 * 60 * 60
     # Scores below `threshold - keep_margin` are discarded after scoring, so the

@@ -38,7 +38,7 @@ _MIN_DISTINCT_NUMBERS_FOR_OVERLAP = 50
 # Numbers or dates that mostly agree, but not exactly, get a tolerance.
 _EXACT_AGREEMENT = 0.9
 _NUMBER_TOLERANCE = 0.05
-_DATE_TOLERANCE_DAYS = 31
+_DATE_TOLERANCE_DAYS = 365
 _FUZZY_PROBES = 100
 _FUZZY_MATCH = 85
 _OVERLAP_TEXT_CLEANING = TextCleaning(remove_legal_suffixes=True)
